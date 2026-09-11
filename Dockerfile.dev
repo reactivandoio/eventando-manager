@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
 # Install dependencies for Strapi (sharp/vips)
-RUN apk add --no-cache build-base gcc autoconf automake zlib-dev libpng-dev vips-dev > /dev/null 2>&1
+RUN apk add --no-cache git build-base gcc autoconf automake zlib-dev libpng-dev vips-dev > /dev/null 2>&1
 
 WORKDIR /opt/app
 
