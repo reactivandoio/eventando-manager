@@ -853,6 +853,7 @@ export interface ApiBatchBatch extends Schema.CollectionType {
     value: Attribute.BigInteger & Attribute.Required;
     max_quantity: Attribute.Integer;
     enabled: Attribute.Boolean & Attribute.DefaultTo<true>;
+    deleted: Attribute.Boolean & Attribute.DefaultTo<false>;
     valid_from: Attribute.DateTime;
     valid_until: Attribute.DateTime;
     exclusive_label: Attribute.String;
@@ -955,7 +956,6 @@ export interface ApiEventEvent extends Schema.CollectionType {
   attributes: {
     name: Attribute.String;
     pixai_token_integration: Attribute.Text;
-    pixai_token_integration_id: Attribute.Text;
     payments: Attribute.Relation<
       'api::event.event',
       'oneToMany',
@@ -983,6 +983,8 @@ export interface ApiEventEvent extends Schema.CollectionType {
       'oneToMany',
       'api::coupon.coupon'
     >;
+    slug: Attribute.String & Attribute.Unique;
+    uuid: Attribute.UID;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<
@@ -1044,6 +1046,7 @@ export interface ApiPaymentPayment extends Schema.CollectionType {
       'api::coupon.coupon'
     >;
     original_value: Attribute.BigInteger;
+    payment_link: Attribute.String;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<
@@ -1107,6 +1110,7 @@ export interface ApiProductProduct extends Schema.CollectionType {
     description: Attribute.Text;
     enabled: Attribute.Boolean & Attribute.DefaultTo<true>;
     can_be_listed: Attribute.Boolean & Attribute.DefaultTo<true>;
+    deleted: Attribute.Boolean & Attribute.DefaultTo<false>;
     event: Attribute.Relation<
       'api::product.product',
       'manyToOne',
@@ -1197,6 +1201,8 @@ export interface ApiSignupSignup extends Schema.CollectionType {
     t_shirt_size: Attribute.Enumeration<
       ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL']
     >;
+    checked_in: Attribute.Boolean & Attribute.DefaultTo<false>;
+    checked_in_at: Attribute.DateTime;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<

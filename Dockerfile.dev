@@ -1,0 +1,18 @@
+FROM node:20-alpine
+
+# Install dependencies for Strapi (sharp/vips)
+RUN apk add --no-cache git build-base gcc autoconf automake zlib-dev libpng-dev vips-dev > /dev/null 2>&1
+
+WORKDIR /opt/app
+
+# yarn.lock pins a GitHub dependency via git+ssh; the image has no SSH key, so use HTTPS (public repo).
+RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+COPY package.json yarn.lock ./
+RUN yarn config set network-timeout 600000 -g && yarn install
+
+COPY . .
+
+EXPOSE 1341
+
+CMD ["yarn", "develop"]
