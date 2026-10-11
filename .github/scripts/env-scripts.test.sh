@@ -108,7 +108,7 @@ check "apply com variável faltando: .env intacto e .next apagado" 'grep -q "doi
 setup_srv
 OUT=$(bash "$SWAP" apply "$S" .env 2>&1); RC=$?
 check "apply: troca, guarda backup e roda make update" '[ $RC -eq 0 ] && grep -q "outro" "$S/.env" && ls "$S"/.env.bak-* >/dev/null 2>&1 && grep -q "dois" "$S"/.env.bak-* && grep -qx "make update" "$MAKE_LOG"'
-check "apply: arquivos com permissão 600" '[ "$(stat -f %Lp "$S/.env" 2>/dev/null || stat -c %a "$S/.env")" = 600 ]'
+check "apply: arquivos com permissão 600" '[ "$(stat -c %a "$S/.env" 2>/dev/null || stat -f %Lp "$S/.env")" = 600 ]'
 
 setup_srv
 for i in 1 2 3 4 5 6 7; do : > "$S/.env.bak-2026010100000$i"; done
