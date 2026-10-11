@@ -128,5 +128,16 @@ check "workflow: monta o .env" '[ $RC -eq 0 ] && grep -qx "A=1" "$RUNNER_TEMP/ap
 check "workflow: tira SSH_* e github_token do .env" '! grep -qi "^ssh_\|^github_token" "$RUNNER_TEMP/app.env"'
 check "workflow: log só com nomes" '! printf "%s" "$OUT" | grep -q "opk_test_abc\|x y"'
 
+# ---------- regras do runner self-hosted (roda em produção) ----------
+for wf in "$ROOT"/.github/workflows/*.yml; do
+  name=$(basename "$wf")
+  TRIG=$(ruby -ryaml -e 'y = YAML.load_file(ARGV[0]); on = y["on"] || y[true]; puts(on.is_a?(Hash) ? on.keys.join(" ") : Array(on).join(" "))' "$wf")
+  check "$name: sem pull_request" '! printf "%s" "$TRIG" | grep -q "pull_request"'
+  check "$name: só disparo manual" '[ "$TRIG" = "workflow_dispatch" ]'
+  check "$name: roda no runner self-hosted do thor" 'ruby -ryaml -e "exit(YAML.load_file(ARGV[0])[\"jobs\"].values.all? { |j| j[\"runs-on\"] == %w[self-hosted thor] })" "$wf"'
+  check "$name: sem SSH" '! grep -q "secrets.SSH_\|ssh " "$wf"'
+  check "$name: caminho do projeto vem de vars.APP_DIR" 'grep -q "APP_DIR: \${{ vars.APP_DIR }}" "$wf" && ! grep -q "/root/projects/eventando-manager\"\?$" "$wf"'
+done
+
 echo
 [ "$fails" -eq 0 ] && echo "Todos os testes passaram." || { echo "$fails teste(s) falharam."; exit 1; }
