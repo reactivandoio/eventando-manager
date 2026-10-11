@@ -29,9 +29,9 @@ jobs:
     runs-on: [self-hosted, thor]
     environment: production
     env:
-      # Caminho absoluto do projeto no servidor, na variável APP_DIR (Environment production
-      # ou repositório), por exemplo /root/projects/eventando-manager.
-      APP_DIR: ${{ vars.APP_DIR }}
+      # Caminho absoluto do projeto no servidor; a variável APP_DIR (Environment production
+      # ou repositório) substitui o padrão.
+      APP_DIR: ${{ vars.APP_DIR || '/root/projects/eventando-manager' }}
       # Arquivo que o serviço lê no servidor.
       ENV_FILE: .env
       MODE: ${{ inputs.mode }}
@@ -40,7 +40,7 @@ jobs:
         run: |
           [ -n "$APP_DIR" ] || { echo "Defina a variável APP_DIR (caminho absoluto do projeto no servidor)." >&2; exit 1; }
           case "$APP_DIR" in /*) ;; *) echo "APP_DIR precisa ser um caminho absoluto." >&2; exit 1 ;; esac
-          [ -d "$APP_DIR/.git" ] && [ -f "$APP_DIR/Makefile" ] || { echo "$APP_DIR não parece o projeto (sem .git ou Makefile)." >&2; exit 1; }
+          [ -d "$APP_DIR/.git" ] && { [ -f "$APP_DIR/makefile" ] || [ -f "$APP_DIR/Makefile" ]; } || { echo "$APP_DIR não parece o projeto (sem .git ou Makefile)." >&2; exit 1; }
 
       - name: Checkout
         uses: actions/checkout@v4
