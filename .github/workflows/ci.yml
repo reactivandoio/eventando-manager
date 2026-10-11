@@ -1,0 +1,43 @@
+name: CI
+
+# Roda em runner do GitHub (nunca no thor): instala, lint (não bloqueia) e build.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      # O yarn.lock fixa um plugin do GitHub via git+ssh; o runner não tem chave SSH.
+      # O repositório do plugin é público, então HTTPS resolve.
+      - name: git+ssh do GitHub por HTTPS
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Instalar dependências
+        run: yarn install --frozen-lockfile --network-timeout 600000
+
+      # 240 problemas antigos (quase todos de estilo); fica visível sem bloquear.
+      - name: Lint (não bloqueia)
+        continue-on-error: true
+        run: npx -y eslint@8 --no-eslintrc -c .eslintrc --parser espree --parser-options=ecmaVersion:2022 --ext .js config src
+
+      - name: Testes dos scripts de deploy
+        run: bash .github/scripts/env-scripts.test.sh
+
+      - name: Build
+        run: yarn build --no-optimization
