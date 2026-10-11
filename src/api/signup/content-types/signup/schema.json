@@ -54,6 +54,11 @@
     },
     "checked_in_at": {
       "type": "datetime"
+    },
+    "cpf": {
+      "type": "string",
+      "private": true,
+      "maxLength": 11
     }
   }
 }

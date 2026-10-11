@@ -60,6 +60,12 @@
       "relation": "oneToMany",
       "target": "api::sale.sale",
       "mappedBy": "batch"
+    },
+    "coupons": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::coupon.coupon",
+      "mappedBy": "batches"
     }
   }
 }

@@ -64,6 +64,14 @@
     },
     "uuid": {
       "type": "uid"
+    },
+    "payment_provider": {
+      "type": "enumeration",
+      "enum": [
+        "pixai",
+        "opapingou"
+      ],
+      "default": "pixai"
     }
   }
 }
