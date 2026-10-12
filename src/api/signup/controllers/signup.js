@@ -13,6 +13,7 @@ const { reserveSignup } = require("../services/reserve");
 
 const KINDS = ["PIX_QR", "PAYMENT_LINK"];
 const CPF_MESSAGE = "Informe um CPF válido.";
+const RETRY_MESSAGE = "Não conseguimos gerar o pagamento agora. Tente de novo em instantes.";
 
 // O CPF é obrigatório em toda inscrição nova quando SIGNUP_REQUIRE_CPF=true (ligar depois que o
 // BFF e o frontend que mandam o CPF estiverem no ar). Com cupom ele é sempre exigido: a regra
@@ -38,14 +39,33 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
   // Cria (ou reconsulta pela mesma Idempotency-Key) a cobrança do Opa Pingou fora da trava.
   const createOpaCharge = async ({ payment, event, signup }) => {
     const op = createOpaPingou();
+    let charge;
     try {
-      const { charge } = await op.createCharge({
+      ({ charge } = await op.createCharge({
         amountCents: Number(payment.value),
         validity: process.env.OPAPINGOU_CHARGE_VALIDITY || "FIFTEEN_MIN",
         kind: payment.kind || "PIX_QR",
         description: `Inscrição ${event.name || ""} - ${signup.name || ""}`.trim(),
         idempotencyKey: payment.provider_idempotency_key,
+      }));
+    } catch (err) {
+      const code = err && err.code ? err.code : "UNKNOWN";
+      strapi.log.warn(
+        `[signup] cobrança do pagamento ${payment.id} falhou: code=${code} requestId=${(err && err.requestId) || "-"}`
+      );
+      if (err && err.retryable) {
+        // A cobrança pode ter sido criada: o pendente fica com a mesma chave e a pessoa tenta de
+        // novo (mesma cobrança, Idempotent-Replayed).
+        return { error: { status: 503, message: RETRY_MESSAGE } };
+      }
+      await paymentQuery().updateMany({
+        where: { id: payment.id, status: "PEDING_PAYMENT" },
+        data: { status: "CANCELED", canceled_at: new Date() },
       });
+      return { error: { status: 400, message: chargeMessage(code) } };
+    }
+
+    try {
       const updated = await paymentQuery().update({
         where: { id: payment.id },
         data: {
@@ -54,27 +74,15 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
           pix_br_code: charge.brCode || null,
           payment_link: charge.paymentLink || null,
           expires_at: charge.expiresAt ? new Date(charge.expiresAt) : payment.expires_at,
-          payment_identification: charge.id,
+          payment_identification: `opapingou_${charge.id}`,
         },
       });
       return { payment: updated };
     } catch (err) {
-      const code = err && err.code ? err.code : "UNKNOWN";
-      if (err && err.retryable) {
-        // A cobrança pode ter sido criada: o pendente fica com a mesma chave e a pessoa tenta de
-        // novo (mesma cobrança, Idempotent-Replayed).
-        return {
-          error: {
-            status: 503,
-            message: "Não conseguimos gerar o pagamento agora. Tente de novo em instantes.",
-          },
-        };
-      }
-      await paymentQuery().updateMany({
-        where: { id: payment.id, status: "PEDING_PAYMENT" },
-        data: { status: "CANCELED", canceled_at: new Date() },
-      });
-      return { error: { status: 400, message: chargeMessage(code) } };
+      // A cobrança existe no Opa Pingou: nunca cancelar aqui. O pendente fica com a mesma chave;
+      // a nova tentativa da pessoa recebe a mesma cobrança e grava de novo.
+      strapi.log.error(`[signup] cobrança ${charge.id} criada mas não gravada no pagamento ${payment.id}: ${err && err.code}`);
+      return { error: { status: 503, message: RETRY_MESSAGE } };
     }
   };
 

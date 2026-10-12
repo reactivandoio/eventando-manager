@@ -36,6 +36,7 @@ const charges = new Map(); // id → charge
 const byKey = new Map(); // Idempotency-Key → id
 const seen = { creates: 0, keys: [] };
 let nextId = 1;
+const runTag = Date.now().toString(36);
 const mock = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => (raw += c));
@@ -52,7 +53,7 @@ const mock = http.createServer((req, res) => {
       const body = JSON.parse(raw);
       if (body.kind === "PAYMENT_LINK" && body.amountCents === 777) return send(422, { code: "PAYMENT_LINK_UNAVAILABLE", requestId: "r1" });
       seen.creates += 1;
-      const id = `ch_${nextId++}`;
+      const id = `ch_${runTag}_${nextId++}`;
       const charge = {
         id,
         txid: `tx${id}`,
@@ -227,6 +228,7 @@ const processEvent = async (strapi, body) => {
     const pay = await q("api::payment.payment").findOne({ where: { id: one.body.payment_id } });
     assert.equal(pay.attempt, 2);
     assert.ok(String(pay.previous_charge_ids).includes(one.body.pix_br_code.replace("000201", "")));
+    assert.equal(pay.payment_identification, `opapingou_${pay.provider_charge_id}`);
   });
 
   await check("trocar Pix por link é nova tentativa; link indisponível vira 400 e libera", async () => {
@@ -318,6 +320,24 @@ const processEvent = async (strapi, body) => {
     await call(strapi, event.id, { ...person((seq += 20)), batch_id: batch.id, coupon_code: `U${tag}` });
     await assert.rejects(svc.update("api::coupon.coupon", c.id, { data: { discount_percentage: 50 } }), /já foi usado/);
     await svc.update("api::coupon.coupon", c.id, { data: { max_uses: 10 } });
+  });
+
+  await check("POST /api/signups (inscrição na porta do BFF) grava o cpf private e não o devolve", async () => {
+    const { event } = await mkEvent();
+    const cpf = cpfFrom((seq += 20));
+    const ctx = {
+      params: {},
+      query: {},
+      state: {},
+      request: { body: { data: { name: "Porta", email: `porta-${tag}@x.test`, cpf, event: event.id } }, query: {} },
+      is: () => false,
+    };
+    const body = await strapi.controller("api::signup.signup").create(ctx);
+    const out = body || ctx.body;
+    assert.ok(out && out.data && out.data.id, JSON.stringify(out));
+    assert.equal(out.data.attributes.cpf, undefined);
+    const row = await q("api::signup.signup").findOne({ where: { id: out.data.id } });
+    assert.equal(row.cpf, cpf);
   });
 
   await strapi.destroy();
