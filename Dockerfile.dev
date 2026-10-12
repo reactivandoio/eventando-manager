@@ -1,18 +1,23 @@
-FROM node:20-alpine
+# check=skip=InvalidDefaultArgInFrom
+# Ambiente de desenvolvimento (REA-21). Só o Node e as ferramentas: o código entra por volume
+# e o node_modules fica num volume do compose. Use pelo Makefile (make dev, make test...).
+# A versão do Node vem do .nvmrc (o Makefile passa NODE_VERSION); a mesma que o CI usa.
+ARG NODE_VERSION
+FROM node:${NODE_VERSION}-bookworm-slim
 
-# Install dependencies for Strapi (sharp/vips)
-RUN apk add --no-cache git build-base gcc autoconf automake zlib-dev libpng-dev vips-dev > /dev/null 2>&1
+# git: dependências por git; python3/make/g++: módulos nativos (sharp, mysql2); jq/ruby: testes dos scripts de deploy.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates git python3 make g++ jq ruby \
+  && rm -rf /var/lib/apt/lists/*
+
+# O container roda com o UID de quem chama (arquivos gerados no volume do código ficam seus);
+# por isso HOME, cache e node_modules são graváveis por qualquer usuário.
+ENV HOME=/home/dev YARN_CACHE_FOLDER=/cache/yarn
+RUN mkdir -p /home/dev /cache/yarn /opt/app/node_modules \
+  && chmod 1777 /home/dev /cache /cache/yarn /opt/app/node_modules
+
+# O yarn.lock fixa um plugin do GitHub por git+ssh; o container não tem chave SSH. O repositório é
+# público, então HTTPS resolve (o CI faz o mesmo).
+RUN git config --system url."https://github.com/".insteadOf "ssh://git@github.com/"
 
 WORKDIR /opt/app
-
-# yarn.lock pins a GitHub dependency via git+ssh; the image has no SSH key, so use HTTPS (public repo).
-RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
-
-COPY package.json yarn.lock ./
-RUN yarn config set network-timeout 600000 -g && yarn install
-
-COPY . .
-
-EXPOSE 1341
-
-CMD ["yarn", "develop"]

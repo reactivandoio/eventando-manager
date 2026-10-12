@@ -1,5 +1,30 @@
 # 🚀 Getting started with Strapi
 
+## Desenvolvimento em Docker
+
+Só precisa do Docker (macOS ou Linux). A versão do Node fica no `.nvmrc`, a mesma do CI e da produção.
+
+```bash
+make dev     # sobe MySQL + Strapi em http://localhost:1341/admin, com recarga de código
+make test    # testes, como no CI
+make build   # build, como no CI
+make lint    # lint, como no CI (lá ele não bloqueia)
+make shell   # terminal dentro do container
+make down    # para; make reset também apaga os volumes (banco e node_modules)
+```
+
+Na primeira vez, o `make` cria o `.env.dev` a partir do `.env.dev.example` (o `.env.dev` fica fora
+do git). Dentro do container o `.env` é o `.env.dev`: o `.env` da máquina nunca é lido.
+
+`make test` roda também o teste de integração com MySQL, como o CI, num banco à parte
+(`eventando_test`) do mesmo MySQL, sem tocar nos dados do `make dev`. O banco de desenvolvimento
+fica na porta 3308 da máquina. O plugin que o `yarn.lock` fixa por git+ssh é baixado por HTTPS
+dentro do container, como no CI. Para o BFF local falar com este Strapi, crie em Settings -> API
+Tokens um token "Full access" e cole no `.env.dev` do hub-community-bff. A stack inteira sobe com
+`make hub` no hub-community-frontend.
+
+O deploy de produção não usa nada disso: continua com `make update` (pm2) no servidor.
+
 Strapi comes with a full featured [Command Line Interface](https://docs.strapi.io/dev-docs/cli) (CLI) which lets you scaffold and manage your project in seconds.
 
 ### `develop`
