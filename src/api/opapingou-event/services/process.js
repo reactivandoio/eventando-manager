@@ -31,7 +31,22 @@ const publicPayment = (p) =>
 
 // db: { findEvent(eventId), updateEvent(id, data), findPaymentByCharge(chargeId),
 //       transition(paymentId, fromStatuses, data) → count, getPayment(id) }
-const createProcessor = ({ db, opapingou, log, env = process.env, now = () => new Date() }) => {
+// opapingouFor(row): cliente da conta que mandou o webhook (REA-12: a conexão gravada com o evento;
+// sem conexão, a chave global). A reconsulta usa essa conta, então a assinatura válida de uma
+// empresa não move a cobrança de outra: o Opa Pingou responde 404 para cobrança fora da conta.
+// opapingouForPayment(payment): cliente da conta que o pagamento guardou. Usado só quando a conta do
+// webhook responde 404 e é outra (ex.: a mesma empresa com outra chave, restrita a outras contas
+// bancárias). O status vem sempre da reconsulta, nunca do corpo do webhook.
+const connectionIdOf = (c) => (c && c.id) || null;
+const createProcessor = ({
+  db,
+  opapingou,
+  opapingouFor = () => opapingou,
+  opapingouForPayment = null,
+  log,
+  env = process.env,
+  now = () => new Date(),
+}) => {
   const alert = (msg) => log.error(`[ALERTA][opapingou] ${msg}`);
   const acceptTestMode = String(env.OPAPINGOU_ACCEPT_TEST_MODE || "").toLowerCase() === "true";
 
@@ -67,8 +82,18 @@ const createProcessor = ({ db, opapingou, log, env = process.env, now = () => ne
 
     let charge;
     try {
-      charge = await opapingou.getCharge(chargeId);
+      try {
+        charge = await (await opapingouFor(row)).getCharge(chargeId);
+      } catch (err) {
+        const other = connectionIdOf(payment.opapingou_connection) !== connectionIdOf(row.connection);
+        if (!(err && err.status === 404 && opapingouForPayment && other)) throw err;
+        charge = await (await opapingouForPayment(payment)).getCharge(chargeId);
+      }
     } catch (err) {
+      if (err && err.status === 404) {
+        alert(`cobrança ${chargeId} do evento ${row.event_id} não existe na conta que mandou o webhook`);
+        return ignore("charge_not_in_account", { alert: true });
+      }
       const attempts = (Number(row.attempts) || 0) + 1;
       const code = (err && err.code) || "UNKNOWN";
       await db.updateEvent(row.id, {
@@ -107,9 +132,9 @@ const createProcessor = ({ db, opapingou, log, env = process.env, now = () => ne
 const strapiDb = (strapi) => {
   const payments = () => strapi.db.query("api::payment.payment");
   const events = () => strapi.db.query("api::opapingou-event.opapingou-event");
-  const populate = { signup: true, event: true };
+  const populate = { signup: true, event: true, opapingou_connection: true };
   return {
-    findEvent: (eventId) => events().findOne({ where: { event_id: String(eventId) } }),
+    findEvent: (eventId) => events().findOne({ where: { event_id: String(eventId) }, populate: { connection: true } }),
     updateEvent: (id, data) => events().update({ where: { id }, data }),
     findPaymentByCharge: async (chargeId) =>
       (await payments().findOne({ where: { provider_charge_id: chargeId }, populate })) ||

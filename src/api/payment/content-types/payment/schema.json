@@ -122,6 +122,12 @@
     "min_charge_applied": {
       "type": "boolean",
       "default": false
+    },
+    "opapingou_connection": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::opapingou-connection.opapingou-connection",
+      "private": true
     }
   }
 }

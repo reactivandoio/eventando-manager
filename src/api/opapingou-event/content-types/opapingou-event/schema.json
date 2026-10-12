@@ -24,6 +24,11 @@
     },
     "attempts": { "type": "integer", "default": 0 },
     "last_error": { "type": "string" },
-    "processed_at": { "type": "datetime" }
+    "processed_at": { "type": "datetime" },
+    "connection": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::opapingou-connection.opapingou-connection"
+    }
   }
 }
