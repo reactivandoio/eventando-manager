@@ -548,7 +548,7 @@ const processEvent = async (strapi, body) => {
 
     const blocked = await callConn("detach", { params: { eventUuid: event.uuid } });
     assert.equal(blocked.status, 409);
-    assert.equal(blocked.body.error.code, "PENDING_PAYMENTS");
+    assert.equal(blocked.body.error.code, "PAID_BATCHES", "lote pago ativo: a regra mais forte vem primeiro");
 
     await callConn("connect", { body: { event_uuid: event.uuid, api_key: KEY_B } });
     const same = await call(strapi, event.id, { ...p, batch_id: batch.id });
@@ -561,8 +561,13 @@ const processEvent = async (strapi, body) => {
     assert.equal(charges.get(after.provider_charge_id).company, "co_b", "nova tentativa já sai pela conta nova");
 
     await q("api::payment.payment").update({ where: { id: after.id }, data: { expires_at: new Date(Date.now() - 1000) } });
+    // Lote pago ativo exige conta: remover fica recusado até desativar o lote.
+    const paidBlocked = await callConn("detach", { params: { eventUuid: event.uuid } });
+    assert.equal(paidBlocked.status, 409);
+    assert.equal(paidBlocked.body.error.code, "PAID_BATCHES");
+    await q("api::batch.batch").update({ where: { id: batch.id }, data: { enabled: false } });
     const freed = await callConn("detach", { params: { eventUuid: event.uuid } });
-    assert.equal(freed.status, 200);
+    assert.equal(freed.status, 200, JSON.stringify(freed.body));
     assert.deepEqual(freed.body, { connection: null, legacy: false });
   });
 

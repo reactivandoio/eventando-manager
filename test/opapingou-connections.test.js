@@ -48,6 +48,7 @@ const fakeDb = () => {
         ...c,
         events: state.events.filter((e) => e.connection_id === c.id).map((e) => ({ uuid: e.uuid })),
       })),
+    countPaidBatches: async (eventId) => (state.paidBatches || {})[eventId] || 0,
     countOpenPayments: async (eventId, now) =>
       state.payments.filter((p) => p.event === eventId && p.status === "PEDING_PAYMENT" && p.expires_at > now).length,
   };
@@ -347,6 +348,14 @@ test("attach: liga uma conexão existente a outro evento; conexão inexistente �
   assert.equal(s.id, "opc_1");
   assert.equal(db.state.events[1].connection_id, db.state.connections[0].id);
   await assert.rejects(svc.attach({ eventUuid: "ev-b", publicId: "opc_x" }), (e) => e.code === "CONNECTION_NOT_FOUND");
+});
+
+test("detach com lote pago ativo: PAID_BATCHES, a conta fica", async () => {
+  const { svc, db } = setup();
+  await svc.connect({ eventUuid: "ev-a", apiKey: LIVE_KEY, createdBy: "u" });
+  db.state.paidBatches = { [db.state.events[0].id]: 2 };
+  await assert.rejects(svc.detach({ eventUuid: "ev-a" }), (e) => e.code === "PAID_BATCHES" && e.status === 409 && e.extra.count === 2);
+  assert.equal(db.state.events[0].connection_id, db.state.connections[0].id);
 });
 
 test("detach sem conta: CONNECTION_NOT_FOUND e o legado fica", async () => {
