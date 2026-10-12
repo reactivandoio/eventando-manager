@@ -34,6 +34,7 @@ const ERRORS = {
   ENDPOINT_LIMIT: [409, "Esta conta do Opa Pingou já tem 10 webhooks ativos. Desative um que não use mais no painel do Opa Pingou e tente de novo."],
   OPAPINGOU_UNAVAILABLE: [503, "Não conseguimos falar com o Opa Pingou agora. Tente de novo em instantes."],
   CONNECTION_NOT_FOUND: [404, "Conta Opa Pingou não encontrada."],
+  PAID_BATCHES: [409, "Este evento tem lote pago ativo, que precisa de uma conta Opa Pingou. Troque a conta em vez de remover, ou desative os lotes pagos antes."],
   PENDING_PAYMENTS: [409, "Este evento tem pagamentos em aberto. Tente de novo depois que eles forem pagos ou vencerem (até 15 minutos)."],
   NOT_CONFIGURED: [503, "A conexão com o Opa Pingou ainda não está disponível. Fale com o suporte do Hub."],
   SETUP_FAILED: [500, "Não foi possível concluir a conexão com o Opa Pingou. Tente de novo; se continuar, fale com o suporte do Hub."],
@@ -309,6 +310,9 @@ const createConnections = ({
       const event = await loadEvent(eventUuid);
       // Sem conta não há o que remover; evento legado continua na chave global.
       if (!event.opapingou_connection) throw new ConnectionError("CONNECTION_NOT_FOUND");
+      // Lote pago exige conta (REA-12): sem ela as inscrições pagas parariam.
+      const paid = await db.countPaidBatches(event.id);
+      if (paid > 0) throw new ConnectionError("PAID_BATCHES", { count: paid });
       const open = await db.countOpenPayments(event.id, now());
       if (open > 0) throw new ConnectionError("PENDING_PAYMENTS", { count: open });
       await db.setEventConnection(event.id, null, { opapingou_legacy: false });
@@ -358,6 +362,16 @@ const strapiConnectionsDb = (strapi) => {
     deleteConnection: (id) => conns().delete({ where: { id } }),
     listConnections: () =>
       conns().findMany({ where: { status: "active" }, populate: { events: { select: ["uuid"] } }, orderBy: { createdAt: "desc" } }),
+    // Lotes que cobram: ativos, com valor, não apagados, em produto ativo do evento.
+    countPaidBatches: (eventId) =>
+      strapi.db.query("api::batch.batch").count({
+        where: {
+          value: { $gt: 0 },
+          enabled: true,
+          $or: [{ deleted: false }, { deleted: { $null: true } }],
+          product: { event: { id: eventId }, enabled: true },
+        },
+      }),
     countOpenPayments: (eventId, now) =>
       strapi.db.query("api::payment.payment").count({
         where: { event: eventId, status: "PEDING_PAYMENT", expires_at: { $gt: now } },
