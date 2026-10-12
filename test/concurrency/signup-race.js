@@ -29,7 +29,21 @@ Object.assign(process.env, {
   JWT_SECRET: "jwt",
   OPAPINGOU_ENABLED: "true",
   OPAPINGOU_API_KEY: "opk_test_integration_fake",
+  // REA-12: chaves de teste aceitas e a chave mestra do cofre só deste processo.
+  OPAPINGOU_ACCEPT_TEST_MODE: "true",
+  OPAPINGOU_CREDENTIALS_KEY: require("node:crypto").randomBytes(32).toString("base64"),
+  OPAPINGOU_WEBHOOK_BASE_URL: "https://bff.test/webhooks/opapingou",
 });
+
+// REA-12: duas empresas além da conta global. Chave → empresa.
+const KEY_A = `opk_test_${"a".repeat(39)}aaaa`;
+const KEY_B = `opk_test_${"b".repeat(39)}bbbb`;
+const ACCOUNTS = {
+  "opk_test_integration_fake": { id: "co_hub", legalName: "Hub (global)", cnpj: "11111111000111" },
+  [KEY_A]: { id: "co_a", legalName: "Comunidade A LTDA", cnpj: "22222222000122" },
+  [KEY_B]: { id: "co_b", legalName: "Comunidade B LTDA", cnpj: "33333333000133" },
+};
+const endpoints = new Map(); // id → { url, secret, company }
 
 // ---------- Opa Pingou simulado ----------
 const charges = new Map(); // id → charge
@@ -45,9 +59,28 @@ const mock = http.createServer((req, res) => {
       res.writeHead(status, { "content-type": "application/json", ...headers });
       res.end(JSON.stringify(body));
     };
-    if (req.headers.authorization !== "Bearer opk_test_integration_fake") return send(401, { code: "UNAUTHENTICATED" });
+    const apiKey = String(req.headers.authorization || "").replace(/^Bearer /, "");
+    const company = ACCOUNTS[apiKey];
+    if (!company) return send(401, { code: "API_KEY_INVALID" });
+    if (req.method === "GET" && req.url === "/v1/me") {
+      return send(200, { id: `u_${company.id}`, email: "dono@x.test", cpf: "52998224725", company });
+    }
+    if (req.method === "GET" && req.url === "/v1/webhook-endpoints") return send(200, { items: [] });
+    if (req.method === "POST" && req.url === "/v1/webhook-endpoints") {
+      const body = JSON.parse(raw);
+      const id = `we_${runTag}_${endpoints.size + 1}`;
+      const secret = `whsec_${require("node:crypto").randomBytes(16).toString("hex")}`;
+      endpoints.set(id, { url: body.url, secret, company: company.id });
+      return send(201, { id, url: body.url, status: "ACTIVE", testMode: true, secret });
+    }
+    const ep = req.url.match(/^\/v1\/webhook-endpoints\/(.+)$/);
+    if (req.method === "GET" && ep) {
+      const e = endpoints.get(ep[1]);
+      return e && e.company === company.id ? send(200, { id: ep[1], url: e.url, status: "ACTIVE" }) : send(404, { code: "NOT_FOUND" });
+    }
     if (req.method === "POST" && req.url === "/v1/charges") {
       const key = req.headers["idempotency-key"];
+      if (!key) return send(400, { code: "VALIDATION_FAILED" });
       seen.keys.push(key);
       if (byKey.has(key)) return send(201, charges.get(byKey.get(key)), { "idempotent-replayed": "true" });
       const body = JSON.parse(raw);
@@ -55,6 +88,7 @@ const mock = http.createServer((req, res) => {
       seen.creates += 1;
       const id = `ch_${runTag}_${nextId++}`;
       const charge = {
+        company: company.id,
         id,
         txid: `tx${id}`,
         status: "PENDING",
@@ -68,7 +102,10 @@ const mock = http.createServer((req, res) => {
       return send(201, charge);
     }
     const m = req.url.match(/^\/v1\/charges\/(.+)$/);
-    if (req.method === "GET" && m) return charges.has(m[1]) ? send(200, charges.get(m[1])) : send(404, { code: "NOT_FOUND" });
+    if (req.method === "GET" && m) {
+      const c = charges.get(m[1]);
+      return c && c.company === company.id ? send(200, c) : send(404, { code: "NOT_FOUND" });
+    }
     return send(404, { code: "NOT_FOUND" });
   });
 });
@@ -128,8 +165,12 @@ const processEvent = async (strapi, body) => {
   };
 
   const tag = Date.now().toString(36);
-  const mkEvent = async ({ max_slots = null, value = 1000, batchMax = null, half = false } = {}) => {
-    const event = await q("api::event.event").create({ data: { name: `REA6 ${tag}`, max_slots, payment_provider: "opapingou" } });
+  let evSeq = 0;
+  // legacy: evento de antes do REA-12, que cobra pela chave global.
+  const mkEvent = async ({ max_slots = null, value = 1000, batchMax = null, half = false, legacy = true } = {}) => {
+    const event = await q("api::event.event").create({
+      data: { name: `REA6 ${tag}`, max_slots, payment_provider: "opapingou", opapingou_legacy: legacy, uuid: `ev-${tag}-${(evSeq += 1)}` },
+    });
     const product = await q("api::product.product").create({ data: { name: "Ingresso", enabled: true, event: event.id } });
     const batch = await q("api::batch.batch").create({
       data: { batch_number: 1, value, enabled: true, max_quantity: batchMax, half_price_eligible: half, product: product.id },
@@ -405,6 +446,145 @@ const processEvent = async (strapi, body) => {
     } finally {
       process.env.OPAPINGOU_ENABLED = "true";
     }
+  });
+
+  // ---------- REA-12: conta Opa Pingou por evento ----------
+  const connCtl = () => strapi.controller("api::opapingou-connection.opapingou-connection");
+  const callConn = async (handler, { params = {}, body = {} } = {}) => {
+    const out = {};
+    await connCtl()[handler]({ params, query: {}, request: { body }, send(p, st) { out.status = st; out.body = p; } });
+    return out;
+  };
+  const { signOpa } = require("../../src/utils/opa-signature");
+  const deliver = async (publicId, payload, secret) => {
+    const raw = Buffer.from(JSON.stringify(payload));
+    const signature = signOpa({ rawBody: raw, secret, t: Math.floor(Date.now() / 1000) });
+    return callConn("verify", { params: { publicId }, body: { raw_body: raw.toString("base64"), signature } });
+  };
+  const secretOf = (publicId) => [...endpoints.values()].find((e) => e.url.endsWith(`/${publicId}`)).secret;
+
+  await check("REA-12: evento novo sem conta recusa a paga (503) e aceita a gratuita", async () => {
+    const { event, batch } = await mkEvent({ legacy: false });
+    const paid = await call(strapi, event.id, { ...person((seq += 20)), batch_id: batch.id });
+    assert.equal(paid.status, 503);
+    assert.match(paid.body.message, /ainda não está recebendo pagamentos/);
+    const { event: freeEvent, batch: freeBatch } = await mkEvent({ value: 0, legacy: false });
+    const free = await call(strapi, freeEvent.id, { ...person(seq + 1), batch_id: freeBatch.id });
+    assert.equal(free.status, 200);
+  });
+
+  let connA;
+  await check("REA-12: conectar valida, cadastra o webhook com a URL da conexão e nunca devolve a chave", async () => {
+    const { event } = await mkEvent({ legacy: false });
+    const r = await callConn("connect", { body: { event_uuid: event.uuid, api_key: KEY_A, created_by: "user-a", created_by_name: "Ana" } });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    connA = r.body.connection;
+    assert.equal(connA.company_name, "Comunidade A LTDA");
+    assert.equal(connA.company_document, "**.***.***/0001-22");
+    assert.equal(connA.key_last4, "aaaa");
+    assert.ok(!JSON.stringify(r.body).includes(KEY_A));
+    assert.ok(!JSON.stringify(r.body).includes("whsec_"));
+    assert.ok([...endpoints.values()].some((e) => e.url === `https://bff.test/webhooks/opapingou/${connA.id}`));
+    const row = await q("api::opapingou-connection.opapingou-connection").findOne({ where: { public_id: connA.id } });
+    assert.ok(!row.key_encrypted.includes(KEY_A));
+    assert.ok(!row.webhook_secret_encrypted.includes("whsec_"));
+    const mine = await callConn("forEvent", { params: { eventUuid: event.uuid } });
+    assert.equal(mine.body.connection.id, connA.id);
+    assert.equal(mine.body.legacy, false);
+  });
+
+  await check("REA-12: chave errada e evento inexistente dão erro claro", async () => {
+    const { event } = await mkEvent({ legacy: false });
+    const bad = await callConn("connect", { body: { event_uuid: event.uuid, api_key: `opk_test_${"z".repeat(43)}` } });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "INVALID_KEY");
+    const none = await callConn("connect", { body: { event_uuid: "nao-existe", api_key: KEY_A } });
+    assert.equal(none.status, 404);
+  });
+
+  await check("REA-12: duas empresas: cada evento cobra pela própria conta e o webhook de uma não move a outra", async () => {
+    const { event: evA, batch: bA } = await mkEvent({ legacy: false });
+    const { event: evB, batch: bB } = await mkEvent({ legacy: false });
+    const a = await callConn("connect", { body: { event_uuid: evA.uuid, api_key: KEY_A } });
+    const b = await callConn("connect", { body: { event_uuid: evB.uuid, api_key: KEY_B } });
+    assert.equal(a.body.connection.id, connA.id, "mesma empresa reaproveita a conexão");
+    assert.notEqual(b.body.connection.id, connA.id);
+
+    const ra = await call(strapi, evA.id, { ...person((seq += 20)), batch_id: bA.id });
+    const rb = await call(strapi, evB.id, { ...person(seq + 1), batch_id: bB.id });
+    assert.equal(ra.status, 200, JSON.stringify(ra.body));
+    assert.equal(rb.status, 200, JSON.stringify(rb.body));
+    const payA = await q("api::payment.payment").findOne({ where: { id: ra.body.payment_id }, populate: { opapingou_connection: true } });
+    const payB = await q("api::payment.payment").findOne({ where: { id: rb.body.payment_id }, populate: { opapingou_connection: true } });
+    assert.equal(charges.get(payA.provider_charge_id).company, "co_a");
+    assert.equal(charges.get(payB.provider_charge_id).company, "co_b");
+    assert.equal(payA.opapingou_connection.public_id, connA.id);
+
+    // Assinatura com o segredo de A vale na URL de A; na URL de B, não.
+    const payload = { id: `evt_x_${tag}`, type: "charge.paid", data: { type: "charge", object: { id: payA.provider_charge_id } } };
+    const okA = await deliver(connA.id, payload, secretOf(connA.id));
+    assert.deepEqual(okA.body, { found: true, valid: true, test_mode: true });
+    const crossed = await deliver(b.body.connection.id, payload, secretOf(connA.id));
+    assert.equal(crossed.body.valid, false);
+
+    // Mesmo com assinatura válida de B, a cobrança de A não confirma: a releitura usa a chave de B.
+    charges.get(payA.provider_charge_id).status = "PAID";
+    const viaB = await processEvent(strapi, { event_id: `evt_rea12_b_${tag}`, type: "charge.paid", charge_id: payA.provider_charge_id, connection: b.body.connection.id });
+    assert.equal(viaB.body.reason, "charge_not_in_account");
+    assert.equal((await q("api::payment.payment").findOne({ where: { id: payA.id } })).status, "PEDING_PAYMENT");
+
+    const viaA = await processEvent(strapi, { event_id: `evt_rea12_a_${tag}`, type: "charge.paid", charge_id: payA.provider_charge_id, connection: connA.id });
+    assert.equal(viaA.body.transitioned, true, JSON.stringify(viaA.body));
+    assert.equal(viaA.body.status, "CONFIRMED");
+  });
+
+  await check("REA-12: trocar de conta com Pix pendente: o pendente segue na conta antiga; remover espera", async () => {
+    const { event, batch } = await mkEvent({ legacy: false });
+    await callConn("connect", { body: { event_uuid: event.uuid, api_key: KEY_A } });
+    const p = person((seq += 20));
+    const r = await call(strapi, event.id, { ...p, batch_id: batch.id });
+    const before = await q("api::payment.payment").findOne({ where: { id: r.body.payment_id } });
+
+    const blocked = await callConn("detach", { params: { eventUuid: event.uuid } });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error.code, "PENDING_PAYMENTS");
+
+    await callConn("connect", { body: { event_uuid: event.uuid, api_key: KEY_B } });
+    const same = await call(strapi, event.id, { ...p, batch_id: batch.id });
+    assert.equal(same.body.pix_br_code, r.body.pix_br_code, "o Pix aberto continua o mesmo");
+    assert.equal(charges.get(before.provider_charge_id).company, "co_a");
+
+    await q("api::payment.payment").update({ where: { id: before.id }, data: { expires_at: new Date(Date.now() - 1000) } });
+    const retry = await call(strapi, event.id, { ...p, batch_id: batch.id });
+    const after = await q("api::payment.payment").findOne({ where: { id: retry.body.payment_id } });
+    assert.equal(charges.get(after.provider_charge_id).company, "co_b", "nova tentativa já sai pela conta nova");
+
+    await q("api::payment.payment").update({ where: { id: after.id }, data: { expires_at: new Date(Date.now() - 1000) } });
+    const freed = await callConn("detach", { params: { eventUuid: event.uuid } });
+    assert.equal(freed.status, 200);
+    assert.deepEqual(freed.body, { connection: null, legacy: false });
+  });
+
+  await check("REA-12: a API pública do evento não expõe a conexão nem os cifrados", async () => {
+    const { event } = await mkEvent({ legacy: false });
+    await callConn("connect", { body: { event_uuid: event.uuid, api_key: KEY_A } });
+    const row = await q("api::event.event").findOne({ where: { id: event.id }, populate: { opapingou_connection: true } });
+    assert.ok(row.opapingou_connection.key_encrypted);
+    const { sanitize } = require("@strapi/utils");
+    const out = await sanitize.contentAPI.output(row, strapi.getModel("api::event.event"));
+    assert.equal(out.opapingou_connection, undefined);
+    const conn = await sanitize.contentAPI.output(row.opapingou_connection, strapi.getModel("api::opapingou-connection.opapingou-connection"));
+    assert.equal(conn.key_encrypted, undefined);
+    assert.equal(conn.webhook_secret_encrypted, undefined);
+  });
+
+  await check("REA-12: list traz as conexões ativas com os eventos, sem segredo", async () => {
+    const r = await callConn("list");
+    assert.equal(r.status, 200);
+    const a = r.body.data.find((c) => c.id === connA.id);
+    assert.ok(a.event_uuids.length >= 1);
+    assert.ok(!JSON.stringify(r.body).includes("whsec_"));
+    assert.ok(!JSON.stringify(r.body).includes(KEY_A));
   });
 
   await strapi.destroy();

@@ -9,6 +9,8 @@ const { createCoreController } = require("@strapi/strapi").factories;
 const { createOpaPingou, isEnabled } = require("../../../datasources/opapingou");
 const { normalizeCpf } = require("../../../utils/cpf");
 const { reserveSignup } = require("../services/reserve");
+const { createSecretBox } = require("../../../utils/secret-box");
+const { createConnections, strapiConnectionsDb } = require("../../opapingou-connection/services/connections");
 
 const KINDS = ["PIX_QR", "PAYMENT_LINK"];
 const CPF_MESSAGE = "Informe um CPF válido.";
@@ -35,11 +37,27 @@ const chargeMessage = (code) =>
 module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
   const paymentQuery = () => strapi.db.query("api::payment.payment");
 
+  // Cliente da conta que o pagamento guardou na reserva (REA-12); sem conta, a chave global.
+  const clientForPayment = async (payment) => {
+    const row = await paymentQuery().findOne({
+      where: { id: payment.id },
+      select: ["id"],
+      populate: { opapingou_connection: true },
+    });
+    const connections = createConnections({
+      db: strapiConnectionsDb(strapi),
+      makeClient: (apiKey) => createOpaPingou(apiKey === undefined ? {} : { apiKey }),
+      box: createSecretBox(),
+      log: strapi.log,
+    });
+    return connections.clientFor((row && row.opapingou_connection) || null);
+  };
+
   // Cria (ou reconsulta pela mesma Idempotency-Key) a cobrança do Opa Pingou fora da trava.
   const createOpaCharge = async ({ payment, event, signup }) => {
-    const op = createOpaPingou();
     let charge;
     try {
+      const op = await clientForPayment(payment);
       ({ charge } = await op.createCharge({
         amountCents: Number(payment.value),
         validity: process.env.OPAPINGOU_CHARGE_VALIDITY || "FIFTEEN_MIN",

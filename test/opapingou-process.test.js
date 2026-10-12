@@ -159,3 +159,31 @@ test("id da cobrança vem do campo ou do payload", () => {
   assert.equal(chargeIdOf({ payload: { data: { type: "payment", object: { id: "p", chargeId: "c" } } } }), "c");
   assert.equal(chargeIdOf({ payload: { data: { type: "payment", object: { id: "p" } } } }), null);
 });
+
+test("REA-12: reconsulta pela conta do webhook (opapingouFor recebe o evento gravado)", async () => {
+  const db = memoryDb({ events: [ev({ connection: { id: 5, public_id: "opc_5" } })], payments: [pending()] });
+  const seen = [];
+  const run = createProcessor({
+    db,
+    opapingouFor: (row) => {
+      seen.push(row.connection && row.connection.public_id);
+      return { getCharge: async () => ({ status: "PAID" }) };
+    },
+    log: { error() {}, info() {} },
+    env: {},
+  });
+  const r = await run("evt_1");
+  assert.equal(r.body.transitioned, true);
+  assert.deepEqual(seen, ["opc_5"]);
+});
+
+test("REA-12: cobrança que não é da conta do webhook (404): ignora e alerta, sem repetir", async () => {
+  const notFound = Object.assign(new Error("404"), { status: 404, code: "NOT_FOUND" });
+  const { run, db, alerts } = setup({ events: [ev()], payments: [pending()], charges: { ch_1: notFound } });
+  const r = await run("evt_1");
+  assert.equal(r.httpStatus, 200);
+  assert.equal(r.body.reason, "charge_not_in_account");
+  assert.equal(db.events[0].status, "ignored");
+  assert.equal(db.payments[0].status, "PEDING_PAYMENT");
+  assert.ok(alerts.some((m) => m.includes("ch_1")));
+});

@@ -31,7 +31,17 @@ const publicPayment = (p) =>
 
 // db: { findEvent(eventId), updateEvent(id, data), findPaymentByCharge(chargeId),
 //       transition(paymentId, fromStatuses, data) → count, getPayment(id) }
-const createProcessor = ({ db, opapingou, log, env = process.env, now = () => new Date() }) => {
+// opapingouFor(row): cliente da conta que mandou o webhook (REA-12: a conexão gravada com o evento;
+// sem conexão, a chave global). A reconsulta usa essa conta, então a assinatura válida de uma
+// empresa não move a cobrança de outra: o Opa Pingou responde 404 para cobrança fora da conta.
+const createProcessor = ({
+  db,
+  opapingou,
+  opapingouFor = () => opapingou,
+  log,
+  env = process.env,
+  now = () => new Date(),
+}) => {
   const alert = (msg) => log.error(`[ALERTA][opapingou] ${msg}`);
   const acceptTestMode = String(env.OPAPINGOU_ACCEPT_TEST_MODE || "").toLowerCase() === "true";
 
@@ -67,8 +77,12 @@ const createProcessor = ({ db, opapingou, log, env = process.env, now = () => ne
 
     let charge;
     try {
-      charge = await opapingou.getCharge(chargeId);
+      charge = await (await opapingouFor(row)).getCharge(chargeId);
     } catch (err) {
+      if (err && err.status === 404) {
+        alert(`cobrança ${chargeId} do evento ${row.event_id} não existe na conta que mandou o webhook`);
+        return ignore("charge_not_in_account", { alert: true });
+      }
       const attempts = (Number(row.attempts) || 0) + 1;
       const code = (err && err.code) || "UNKNOWN";
       await db.updateEvent(row.id, {
@@ -109,7 +123,7 @@ const strapiDb = (strapi) => {
   const events = () => strapi.db.query("api::opapingou-event.opapingou-event");
   const populate = { signup: true, event: true };
   return {
-    findEvent: (eventId) => events().findOne({ where: { event_id: String(eventId) } }),
+    findEvent: (eventId) => events().findOne({ where: { event_id: String(eventId) }, populate: { connection: true } }),
     updateEvent: (id, data) => events().update({ where: { id }, data }),
     findPaymentByCharge: async (chargeId) =>
       (await payments().findOne({ where: { provider_charge_id: chargeId }, populate })) ||
