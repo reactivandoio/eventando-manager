@@ -72,6 +72,17 @@
         "opapingou"
       ],
       "default": "pixai"
+    },
+    "opapingou_connection": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::opapingou-connection.opapingou-connection",
+      "inversedBy": "events",
+      "private": true
+    },
+    "opapingou_legacy": {
+      "type": "boolean",
+      "default": false
     }
   }
 }

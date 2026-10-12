@@ -1,0 +1,41 @@
+{
+  "kind": "collectionType",
+  "collectionName": "opapingou_connections",
+  "info": {
+    "singularName": "opapingou-connection",
+    "pluralName": "opapingou-connections",
+    "displayName": "Opa Pingou Connection",
+    "description": "Conta Opa Pingou de uma comunidade: chave e segredo de webhook cifrados (REA-12)"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {
+    "content-manager": { "visible": false },
+    "content-type-builder": { "visible": false }
+  },
+  "attributes": {
+    "public_id": { "type": "string", "required": true, "unique": true },
+    "status": {
+      "type": "enumeration",
+      "enum": ["pending", "active", "disabled"],
+      "default": "pending"
+    },
+    "test_mode": { "type": "boolean", "default": false },
+    "company_id": { "type": "string" },
+    "company_name": { "type": "string" },
+    "company_document": { "type": "string" },
+    "key_last4": { "type": "string" },
+    "key_encrypted": { "type": "text", "private": true },
+    "webhook_endpoint_id": { "type": "string" },
+    "webhook_secret_encrypted": { "type": "text", "private": true },
+    "created_by": { "type": "string" },
+    "created_by_name": { "type": "string" },
+    "events": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::event.event",
+      "mappedBy": "opapingou_connection"
+    }
+  }
+}

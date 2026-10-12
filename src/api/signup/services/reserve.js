@@ -12,6 +12,7 @@
 
 const { price, couponWindow, minChargeFor } = require("../../../utils/pricing");
 const { pickHolder } = require("../../../utils/signup-holder");
+const { chargeConnectionFor } = require("../../opapingou-connection/services/connections");
 
 const ACTIVE = ["CONFIRMED", "PEDING_PAYMENT"];
 // O que ocupa vaga e conta uso de cupom: confirmado, ou pendente com prazo (Pix do Opa Pingou).
@@ -27,6 +28,8 @@ const fail = (message, status = 400, code) => ({ error: { status, message, ...(c
 // REA-22: o BFF reconhece pelo código e reenvia a confirmação a quem já tem a inscrição.
 const ALREADY_SIGNED_UP = "ALREADY_SIGNED_UP";
 const alreadySignedUp = () => fail("Você já está inscrito neste evento!", 400, ALREADY_SIGNED_UP);
+const NO_ACCOUNT_MESSAGE =
+  "Este evento ainda não está recebendo pagamentos. Fale com a organização do evento.";
 
 const lockRow = (trx, table, id) =>
   strapi.db.connection(table).transacting(trx).where({ id }).forUpdate().first();
@@ -202,7 +205,10 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
     // 2. Pix vencidos liberam vaga e cupom.
     await expireOverdue(eventId, now);
 
-    const event = await strapi.db.query("api::event.event").findOne({ where: { id: eventId } });
+    const event = await strapi.db.query("api::event.event").findOne({
+      where: { id: eventId },
+      populate: { opapingou_connection: true },
+    });
 
     // 3. Inscrição repetida.
     const existing = await strapi.db.query("api::signup.signup").findOne({
@@ -276,6 +282,14 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
     if (needsCharge && !paidEnabled) {
       return fail("Inscrições pagas estão temporariamente indisponíveis. Tente mais tarde.", 503);
     }
+    // REA-12: a cobrança sai pela conta Opa Pingou do evento e o pagamento guarda qual foi, para a
+    // nova tentativa e o webhook usarem a mesma conta mesmo se o evento trocar de conta depois.
+    let charging = null;
+    if (needsCharge) {
+      charging = chargeConnectionFor(event);
+      if (!charging) return fail(NO_ACCOUNT_MESSAGE, 503);
+    }
+    const connectionField = { opapingou_connection: charging ? charging.connectionId : null };
 
     // 5. Grava.
     let payment;
@@ -289,6 +303,7 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
         where: { id: retryPayment.id },
         data: {
           ...fields,
+          ...connectionField,
           event: eventId,
           attempt,
           provider_idempotency_key:
@@ -308,7 +323,7 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
       }
     } else {
       payment = await strapi.db.query("api::payment.payment").create({
-        data: { ...fields, event: eventId, attempt: 1 },
+        data: { ...fields, ...connectionField, event: eventId, attempt: 1 },
       });
       if (needsCharge) {
         payment = await strapi.db.query("api::payment.payment").update({

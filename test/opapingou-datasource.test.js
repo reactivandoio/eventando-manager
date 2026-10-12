@@ -200,3 +200,80 @@ test("cada tentativa usa no máximo o tempo que sobra do prazo", async () => {
   assert.equal(calls[0].timeout, 15000);
   assert.ok(calls[1].timeout <= 20000 - 15000 - 1000);
 });
+
+test("cadastra endpoint de webhook sem repetir em 5xx (não é idempotente)", async () => {
+  const { op, http, sleeps } = setup([{ status: 503, data: { code: "UNAVAILABLE" } }]);
+  await assert.rejects(
+    op.createWebhookEndpoint({ url: "https://bff.test/webhooks/opapingou/abc", events: ["charge.paid"] }),
+    (err) => err instanceof OpaPingouError && err.status === 503
+  );
+  assert.equal(http.calls.length, 1);
+  assert.deepEqual(sleeps, []);
+});
+
+test("cadastra endpoint com corpo estrito e devolve o segredo sem registrá-lo", async () => {
+  const { op, http, lines } = setup([
+    { status: 201, data: { id: "we_1", url: "https://bff.test/x", secret: "whsec_fake_secret", testMode: true } },
+  ]);
+  const ep = await op.createWebhookEndpoint({
+    url: "https://bff.test/x",
+    description: "d".repeat(200),
+    events: ["charge.paid"],
+  });
+  assert.equal(ep.secret, "whsec_fake_secret");
+  const c = http.calls[0];
+  assert.equal(c.method, "POST");
+  assert.equal(c.url, "https://op.test/v1/webhook-endpoints");
+  assert.deepEqual(Object.keys(c.data).sort(), ["description", "events", "url"]);
+  assert.equal(c.data.description.length, 120);
+  assert.ok(lines.every((l) => !l.includes("whsec_") && !l.includes(KEY)));
+});
+
+test("rede caída no cadastro de endpoint: falha na hora", async () => {
+  const err = Object.assign(new Error("boom"), { code: "ECONNRESET" });
+  const { op, http } = setup([err]);
+  await assert.rejects(op.createWebhookEndpoint({ url: "https://x", events: ["charge.paid"] }), (e) => e.code === "NETWORK_ERROR");
+  assert.equal(http.calls.length, 1);
+});
+
+test("consulta endpoint de webhook pelo id", async () => {
+  const { op, http } = setup([{ status: 200, data: { id: "we_1", status: "ACTIVE" } }]);
+  const ep = await op.getWebhookEndpoint("we_1");
+  assert.equal(ep.status, "ACTIVE");
+  assert.equal(http.calls[0].url, "https://op.test/v1/webhook-endpoints/we_1");
+});
+
+test("missingScopes: 403 INSUFFICIENT_SCOPE marca o escopo; 400/404 contam como presente", async () => {
+  const { op, http, lines } = setup([
+    { status: 404, data: { code: "NOT_FOUND" } },
+    { status: 403, data: { code: "INSUFFICIENT_SCOPE" } },
+    { status: 200, data: { items: [] } },
+  ]);
+  assert.deepEqual(await op.missingScopes(), ["charges:write"]);
+  assert.deepEqual(http.calls.map((c) => `${c.method} ${c.url.replace("https://op.test", "")}`), [
+    "GET /v1/charges/00000000-0000-4000-8000-000000000000",
+    "POST /v1/charges",
+    "GET /v1/webhook-endpoints",
+  ]);
+  // POST sem Idempotency-Key e com corpo vazio: o Opa Pingou recusa antes de criar qualquer coisa.
+  assert.equal(http.calls[1].headers["Idempotency-Key"], undefined);
+  assert.deepEqual(http.calls[1].data, {});
+  assert.equal(http.calls.length, 3);
+  assert.ok(lines.length >= 3);
+});
+
+test("missingScopes: chave recusada (401) é erro, não escopo faltando", async () => {
+  const { op } = setup([{ status: 401, data: { code: "API_KEY_INVALID" } }]);
+  await assert.rejects(op.missingScopes(), (err) => err.status === 401);
+});
+
+test("lista endpoints e rotaciona o segredo sem repetir", async () => {
+  const { op, http } = setup([
+    { status: 200, data: { items: [{ id: "we_1", url: "https://x/opc_1" }] } },
+    { status: 503, data: { code: "UNAVAILABLE" } },
+  ]);
+  assert.deepEqual(await op.listWebhookEndpoints(), [{ id: "we_1", url: "https://x/opc_1" }]);
+  await assert.rejects(op.rotateWebhookSecret("we_1"), (e) => e.status === 503);
+  assert.equal(http.calls.length, 2);
+  assert.equal(http.calls[1].url, "https://op.test/v1/webhook-endpoints/we_1/rotate-secret");
+});

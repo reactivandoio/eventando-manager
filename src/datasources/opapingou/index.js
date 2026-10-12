@@ -14,6 +14,7 @@ const { OpaPingouError, IDEMPOTENCY_CODES } = require("./errors");
 
 const DEFAULT_URL = "https://api.opapingou.com.br";
 const BACKOFF_MS = [1000, 2000, 4000];
+const NIL_UUID = "00000000-0000-4000-8000-000000000000";
 
 const defaultLog = {
   info: (...a) => (global.strapi ? strapi.log.info(...a) : console.log(...a)),
@@ -46,7 +47,10 @@ const createOpaPingou = ({
 } = {}) => {
   const root = String(baseUrl).replace(/\/+$/, "");
 
-  const request = async (method, path, { data, idempotencyKey } = {}) => {
+  // retry: false para chamada que não é idempotente (cadastro de endpoint): repetir poderia criar
+  // dois endpoints. Aí rede, 429 e 5xx viram erro na hora.
+  // quiet: resposta de erro esperada (sondagem de escopos) vai para o log como info.
+  const request = async (method, path, { data, idempotencyKey, retry = true, quiet = false } = {}) => {
     if (!apiKey) throw new OpaPingouError({ code: "API_KEY_MISSING" });
     const headers = { Accept: "application/json", Authorization: `Bearer ${apiKey}` };
     if (data !== undefined) headers["Content-Type"] = "application/json";
@@ -85,7 +89,7 @@ const createOpaPingou = ({
         log.error(
           `[opapingou] ${method} ${path} falhou na rede (${code}) em ${now() - t0} ms, tentativa ${attempt + 1}`
         );
-        if (attempt < BACKOFF_MS.length && (await waitOrGiveUp(BACKOFF_MS[attempt]))) continue;
+        if (retry && attempt < BACKOFF_MS.length && (await waitOrGiveUp(BACKOFF_MS[attempt]))) continue;
         if (left() < 1000) throw outOfTime();
         throw new OpaPingouError({ code: "NETWORK_ERROR", retryable: true });
       }
@@ -102,7 +106,7 @@ const createOpaPingou = ({
       }
 
       const code = body.code || `HTTP_${res.status}`;
-      log.error(
+      (quiet ? log.info : log.error)(
         `[opapingou] ${method} ${path} → HTTP ${res.status} em ${now() - t0} ms code=${code} requestId=${requestId || "-"}`
       );
       if (IDEMPOTENCY_CODES.has(code)) {
@@ -110,7 +114,7 @@ const createOpaPingou = ({
         throw new OpaPingouError({ status: res.status, code, requestId });
       }
       const retryable = res.status === 429 || res.status >= 500;
-      if (retryable && attempt < BACKOFF_MS.length) {
+      if (retry && retryable && attempt < BACKOFF_MS.length) {
         const wait = res.status === 429 ? retryAfterMs(res.headers, BACKOFF_MS[attempt]) : BACKOFF_MS[attempt];
         if (await waitOrGiveUp(wait)) continue;
       }
@@ -135,6 +139,45 @@ const createOpaPingou = ({
     },
     async getCharge(id) {
       return (await request("GET", `/v1/charges/${encodeURIComponent(id)}`)).data;
+    },
+    // Devolve o endpoint com o `secret` (whsec_), que o Opa Pingou só mostra aqui. Quem chama
+    // guarda o segredo cifrado e nunca o registra.
+    async createWebhookEndpoint({ url, description, events }) {
+      const data = { url, events };
+      if (description) data.description = String(description).slice(0, 120);
+      return (await request("POST", "/v1/webhook-endpoints", { data, retry: false })).data;
+    },
+    // Quais dos escopos de cobrança e webhook a chave não tem, sem efeito colateral: no Opa Pingou o
+    // ScopesGuard roda antes da validação, então sem o escopo vem 403 INSUFFICIENT_SCOPE e com ele
+    // vem 400/404 (corpo vazio, cobrança inexistente). Nenhuma cobrança é criada.
+    async missingScopes() {
+      const probes = [
+        ["charges:read", "GET", `/v1/charges/${NIL_UUID}`, undefined],
+        ["charges:write", "POST", "/v1/charges", {}],
+        ["webhooks:read", "GET", "/v1/webhook-endpoints", undefined],
+      ];
+      const missing = [];
+      for (const [scope, method, path, data] of probes) {
+        try {
+          await request(method, path, { data, retry: false, quiet: true });
+        } catch (err) {
+          if (!(err instanceof OpaPingouError)) throw err;
+          if (err.code === "INSUFFICIENT_SCOPE") missing.push(scope);
+          else if (err.status === null || err.status === 401 || err.status === 429 || err.status >= 500) throw err;
+        }
+      }
+      return missing;
+    },
+    async listWebhookEndpoints() {
+      const data = (await request("GET", "/v1/webhook-endpoints")).data;
+      return Array.isArray(data && data.items) ? data.items : [];
+    },
+    // Novo whsec_ para um endpoint que já existe (devolvido só aqui). Sem repetir: cada chamada troca.
+    async rotateWebhookSecret(id) {
+      return (await request("POST", `/v1/webhook-endpoints/${encodeURIComponent(id)}/rotate-secret`, { retry: false })).data;
+    },
+    async getWebhookEndpoint(id) {
+      return (await request("GET", `/v1/webhook-endpoints/${encodeURIComponent(id)}`)).data;
     },
   };
 };

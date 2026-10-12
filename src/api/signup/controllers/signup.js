@@ -10,6 +10,8 @@ const { createOpaPingou, isEnabled } = require("../../../datasources/opapingou")
 const { normalizeCpf } = require("../../../utils/cpf");
 const { reserveSignup } = require("../services/reserve");
 const { pickHolder, normalizeEmail } = require("../../../utils/signup-holder");
+const { createSecretBox } = require("../../../utils/secret-box");
+const { createConnections, strapiConnectionsDb } = require("../../opapingou-connection/services/connections");
 
 const KINDS = ["PIX_QR", "PAYMENT_LINK"];
 const CPF_MESSAGE = "Informe um CPF válido.";
@@ -36,11 +38,27 @@ const chargeMessage = (code) =>
 module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
   const paymentQuery = () => strapi.db.query("api::payment.payment");
 
+  // Cliente da conta que o pagamento guardou na reserva (REA-12); sem conta, a chave global.
+  const clientForPayment = async (payment) => {
+    const row = await paymentQuery().findOne({
+      where: { id: payment.id },
+      select: ["id"],
+      populate: { opapingou_connection: true },
+    });
+    const connections = createConnections({
+      db: strapiConnectionsDb(strapi),
+      makeClient: (apiKey) => createOpaPingou(apiKey === undefined ? {} : { apiKey }),
+      box: createSecretBox(),
+      log: strapi.log,
+    });
+    return connections.clientFor((row && row.opapingou_connection) || null);
+  };
+
   // Cria (ou reconsulta pela mesma Idempotency-Key) a cobrança do Opa Pingou fora da trava.
   const createOpaCharge = async ({ payment, event, signup }) => {
-    const op = createOpaPingou();
     let charge;
     try {
+      const op = await clientForPayment(payment);
       ({ charge } = await op.createCharge({
         amountCents: Number(payment.value),
         validity: process.env.OPAPINGOU_CHARGE_VALIDITY || "FIFTEEN_MIN",
@@ -49,6 +67,12 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
         idempotencyKey: payment.provider_idempotency_key,
       }));
     } catch (err) {
+      if (err && err.name === "SecretBoxError") {
+        // Chave mestra ausente ou trocada: nada foi criado no Opa Pingou e não é culpa da pessoa.
+        // Não cancela; o pendente fica para a nova tentativa depois de corrigir a configuração.
+        strapi.log.error(`[ALERTA][opapingou] cofre de credenciais indisponível ao cobrar o pagamento ${payment.id}: ${err.code}`);
+        return { error: { status: 503, message: RETRY_MESSAGE } };
+      }
       const code = err && err.code ? err.code : "UNKNOWN";
       strapi.log.warn(
         `[signup] cobrança do pagamento ${payment.id} falhou: code=${code} requestId=${(err && err.requestId) || "-"}`
