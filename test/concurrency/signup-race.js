@@ -340,6 +340,73 @@ const processEvent = async (strapi, body) => {
     assert.equal(row.cpf, cpf);
   });
 
+  await check("REA-15: evento ainda marcado pixai cobra pelo Opa Pingou", async () => {
+    const { event, batch } = await mkEvent();
+    await q("api::event.event").update({ where: { id: event.id }, data: { payment_provider: "pixai" } });
+    const r = await call(strapi, event.id, { ...person((seq += 20)), batch_id: batch.id });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.payment_provider, "opapingou");
+    assert.ok(r.body.pix_br_code);
+    assert.equal(r.body.qr_code, undefined);
+  });
+
+  await check("REA-15: pendente antigo do Pix Aí vira nova tentativa pelo Opa Pingou", async () => {
+    const { event, batch } = await mkEvent({ max_slots: 1 });
+    const p = person((seq += 20));
+    const legacy = await q("api::payment.payment").create({
+      data: { value: 1000, original_value: 1000, status: "PEDING_PAYMENT", event: event.id, batch: batch.id, pix_qr_code: "legado", payment_identification: `legacy_${tag}` },
+    });
+    await q("api::signup.signup").create({ data: { name: p.name, email: p.email, event: event.id, payment: legacy.id } });
+    const r = await call(strapi, event.id, { ...p, batch_id: batch.id });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.payment_id, legacy.id);
+    assert.equal(r.body.payment_provider, "opapingou");
+    const pay = await q("api::payment.payment").findOne({ where: { id: legacy.id } });
+    assert.equal(pay.provider, "opapingou");
+    assert.equal(pay.attempt, 2);
+    assert.equal(pay.pix_qr_code, null);
+  });
+
+  await check("REA-15: pendente antigo do Pix Aí não ocupa vaga nem conta uso de cupom", async () => {
+    const { event, batch } = await mkEvent({ max_slots: 1 });
+    const coupon = await q("api::coupon.coupon").create({ data: { code: `L${tag}`, discount_percentage: 10, max_uses: 1, enabled: true, event: event.id } });
+    await q("api::payment.payment").create({
+      data: { value: 900, status: "PEDING_PAYMENT", event: event.id, batch: batch.id, coupon: coupon.id, payment_identification: `legacy_slot_${tag}` },
+    });
+    const r = await call(strapi, event.id, { ...person((seq += 20)), batch_id: batch.id, coupon_code: `L${tag}` });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.discount_kind, "coupon");
+  });
+
+  await check("REA-15: confirmado antigo do Pix Aí continua inscrito", async () => {
+    const { event, batch } = await mkEvent();
+    const p = person((seq += 20));
+    const old = await q("api::payment.payment").create({
+      data: { value: 1000, status: "CONFIRMED", event: event.id, batch: batch.id, pix_qr_code: "legado", payment_identification: `legacy_ok_${tag}` },
+    });
+    await q("api::signup.signup").create({ data: { name: p.name, email: p.email, event: event.id, payment: old.id } });
+    const r = await call(strapi, event.id, { ...p, batch_id: batch.id });
+    assert.equal(r.status, 400);
+    assert.match(r.body.message, /já está inscrito/);
+    assert.equal((await q("api::payment.payment").findOne({ where: { id: old.id } })).status, "CONFIRMED");
+  });
+
+  await check("REA-15: OPAPINGOU_ENABLED desligada recusa a paga (503) e aceita a gratuita", async () => {
+    const { event, batch } = await mkEvent();
+    const { event: freeEvent, batch: freeBatch } = await mkEvent({ value: 0 });
+    process.env.OPAPINGOU_ENABLED = "false";
+    try {
+      const paid = await call(strapi, event.id, { ...person((seq += 20)), batch_id: batch.id });
+      assert.equal(paid.status, 503);
+      assert.equal(await q("api::payment.payment").count({ where: { event: event.id } }), 0);
+      const free = await call(strapi, freeEvent.id, { ...person(seq + 1), batch_id: freeBatch.id });
+      assert.equal(free.status, 200);
+      assert.equal(free.body.is_free, true);
+    } finally {
+      process.env.OPAPINGOU_ENABLED = "true";
+    }
+  });
+
   await strapi.destroy();
   mock.close();
   console.log(failures ? `\n${failures} falha(s).` : "\nTudo certo.");

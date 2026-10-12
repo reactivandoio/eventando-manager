@@ -60,9 +60,9 @@ const couponWindow = (coupon, batch) => ({
       : null,
 });
 
-const minChargeFor = (provider, env = process.env) => {
-  const raw = provider === "opapingou" ? env.OPAPINGOU_MIN_CHARGE_CENTS : env.PIXAI_MIN_CHARGE_CENTS;
-  const n = Math.floor(Number(raw));
+// Mínimo de cobrança do Opa Pingou, o único provedor (REA-15).
+const minChargeFor = (env = process.env) => {
+  const n = Math.floor(Number(env.OPAPINGOU_MIN_CHARGE_CENTS));
   return Number.isFinite(n) && n >= 1 ? n : 1;
 };
 

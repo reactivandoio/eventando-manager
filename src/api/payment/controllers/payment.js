@@ -9,10 +9,6 @@
 const { createCoreController } = require("@strapi/strapi").factories;
 
 module.exports = createCoreController("api::payment.payment", ({ strapi }) => {
-  const paymentIntegrationService = strapi.service(
-    "api::payment-integration.payment-integration"
-  );
-
   const paymentService = strapi.service("api::payment.payment");
 
   const signupService = strapi.service("api::signup.signup");
@@ -86,52 +82,6 @@ module.exports = createCoreController("api::payment.payment", ({ strapi }) => {
   };
 
   return {
-    async integration(ctx) {
-      const { body } = ctx.request;
-
-      paymentIntegrationService.create({
-        data: {
-          payload: body,
-        },
-      });
-
-      if (body.event === "payment_initiation/completed") {
-        let paymentEntry = null;
-
-        try {
-          const response = await paymentService.find({
-            filters: {
-              payment_identification: body.payload.payment_identification,
-            },
-            populate: ["signup"],
-          });
-
-          paymentEntry = response.results[0];
-        } catch (err) {
-          return ctx.send("Error on load payment", 400);
-        }
-
-        const itemToMail = buildItemToMail(paymentEntry);
-
-        sendMail(itemToMail);
-
-        try {
-          await paymentService.update(paymentEntry.id, {
-            data: {
-              status: "CONFIRMED",
-              confirmed_at: new Date(),
-            },
-          });
-        } catch (err) {
-          return ctx.send("Error on update payment", 400);
-        }
-
-        return ctx.send({ status: "CONFIRMED", payment_id: paymentEntry.id }, 200);
-      }
-
-      return ctx.send({ message: "event not found" }, 404);
-    },
-
     async resendEmail(ctx) {
       const { payment_identification } = ctx.request.body;
 
