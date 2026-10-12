@@ -33,7 +33,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Mesma versão do ambiente Docker de desenvolvimento e da produção (REA-21).
+          node-version-file: .nvmrc
           cache: yarn
 
       # O yarn.lock fixa um plugin do GitHub via git+ssh; o runner não tem chave SSH.
@@ -64,3 +65,15 @@ jobs:
 
       - name: Build
         run: yarn build --no-optimization
+
+  # O ambiente de desenvolvimento (Dockerfile.dev) monta com a versão do .nvmrc.
+  docker-dev:
+    name: docker-dev
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Imagem de desenvolvimento usa o Node do .nvmrc
+        run: |
+          docker build -q -f Dockerfile.dev --build-arg NODE_VERSION="$(cat .nvmrc)" -t dev-check .
+          test "$(docker run --rm dev-check node -v)" = "v$(cat .nvmrc)"
