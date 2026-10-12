@@ -527,11 +527,12 @@ const processEvent = async (strapi, body) => {
     const crossed = await deliver(b.body.connection.id, payload, secretOf(connA.id));
     assert.equal(crossed.body.valid, false);
 
-    // Mesmo com assinatura válida de B, a cobrança de A não confirma: a releitura usa a chave de B.
-    charges.get(payA.provider_charge_id).status = "PAID";
+    // Webhook válido de B dizendo "pago" sobre a cobrança de A, que ainda está pendente: nada muda.
+    // O status vem da reconsulta no Opa Pingou (pela conta do pagamento), nunca do corpo.
     const viaB = await processEvent(strapi, { event_id: `evt_rea12_b_${tag}`, type: "charge.paid", charge_id: payA.provider_charge_id, connection: b.body.connection.id });
-    assert.equal(viaB.body.reason, "charge_not_in_account");
+    assert.equal(viaB.body.transitioned, false, JSON.stringify(viaB.body));
     assert.equal((await q("api::payment.payment").findOne({ where: { id: payA.id } })).status, "PEDING_PAYMENT");
+    charges.get(payA.provider_charge_id).status = "PAID";
 
     const viaA = await processEvent(strapi, { event_id: `evt_rea12_a_${tag}`, type: "charge.paid", charge_id: payA.provider_charge_id, connection: connA.id });
     assert.equal(viaA.body.transitioned, true, JSON.stringify(viaA.body));

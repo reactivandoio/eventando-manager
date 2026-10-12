@@ -29,8 +29,11 @@ const fakeDb = () => {
       Object.assign(e, extra);
     },
     findConnectionByPublicId: async (publicId) => state.connections.find((c) => c.public_id === publicId) || null,
-    findActiveConnectionByCompany: async (companyId, testMode) =>
-      [...state.connections].reverse().find((c) => c.company_id === companyId && c.test_mode === testMode && c.status === "active") || null,
+    findActiveConnectionsByCompany: async (companyId, testMode) =>
+      [...state.connections].reverse().filter((c) => c.company_id === companyId && c.test_mode === testMode && c.status === "active"),
+    moveEvents: async (fromId, toId) => {
+      state.events.filter((e) => e.connection_id === fromId).forEach((e) => (e.connection_id = toId));
+    },
     createConnection: async (data) => {
       const row = { id: state.seq++, createdAt: NOW, ...data };
       state.connections.push(row);
@@ -51,7 +54,7 @@ const fakeDb = () => {
 };
 
 // Opa Pingou falso: uma "conta" por chave.
-const fakeOpa = ({ accounts = {}, endpointLimit = false, createFails = null } = {}) => {
+const fakeOpa = ({ accounts = {}, endpointLimit = false, createFails = null, createLandsThenFails = null } = {}) => {
   const calls = [];
   const endpoints = new Map();
   let n = 0;
@@ -81,6 +84,18 @@ const fakeOpa = ({ accounts = {}, endpointLimit = false, createFails = null } = 
         n += 1;
         const ep = { id: `we_${n}`, url: body.url, status: "ACTIVE", companyId: account.company.id, secret: `whsec_secret_${n}` };
         endpoints.set(ep.id, ep);
+        if (createLandsThenFails) throw createLandsThenFails; // chegou, mas a resposta se perdeu
+        return { ...ep };
+      },
+      listWebhookEndpoints: async () => {
+        calls.push(["listWebhookEndpoints", apiKey]);
+        guard();
+        return [...endpoints.values()].filter((e) => e.companyId === account.company.id).map(({ secret, ...rest }) => rest);
+      },
+      rotateWebhookSecret: async (id) => {
+        calls.push(["rotateWebhookSecret", apiKey, id]);
+        const ep = endpoints.get(id);
+        ep.secret = `whsec_rotated_${id}`;
         return { ...ep };
       },
       getWebhookEndpoint: async (id) => {
@@ -239,6 +254,22 @@ test("falta webhooks:write no cadastro do endpoint: MISSING_SCOPES", async () =>
   assert.equal(db.state.connections.length, 0);
 });
 
+test("cadastro do endpoint chegou mas a resposta se perdeu: recupera pela URL com rotate-secret", async () => {
+  const opa = fakeOpa({
+    accounts: { [LIVE_KEY]: { company: company() } },
+    createLandsThenFails: new OpaPingouError({ status: null, code: "NETWORK_ERROR", retryable: true }),
+  });
+  const { svc, db } = setup({ opa });
+  const s = await svc.connect({ eventUuid: "ev-a", apiKey: LIVE_KEY, createdBy: "u" });
+  assert.equal(s.status, "active");
+  assert.ok(opa.calls.some((c) => c[0] === "rotateWebhookSecret" && c[2] === "we_1"));
+  const rawBody = Buffer.from("{}");
+  const t = Math.floor(NOW.getTime() / 1000);
+  const ok = await svc.verifyWebhook({ publicId: "opc_1", rawBody, signature: signOpa({ rawBody, secret: "whsec_rotated_we_1", t }), nowS: t });
+  assert.equal(ok.valid, true);
+  assert.equal(db.state.connections.length, 1);
+});
+
 test("Opa Pingou fora do ar: OPAPINGOU_UNAVAILABLE", async () => {
   const opa = fakeOpa({
     accounts: { [LIVE_KEY]: { company: company() } },
@@ -248,21 +279,31 @@ test("Opa Pingou fora do ar: OPAPINGOU_UNAVAILABLE", async () => {
   await assert.rejects(svc.connect({ eventUuid: "ev-a", apiKey: LIVE_KEY, createdBy: "u" }), (e) => e.code === "OPAPINGOU_UNAVAILABLE");
 });
 
-test("mesma empresa em outro evento: reaproveita a conexão e o endpoint, troca a chave", async () => {
+test("mesma chave em outro evento: reaproveita a conexão e o endpoint", async () => {
+  const opa = fakeOpa({ accounts: { [LIVE_KEY]: { company: company() } } });
+  const { svc, db } = setup({ opa });
+  await svc.connect({ eventUuid: "ev-a", apiKey: LIVE_KEY, createdBy: "u1" });
+  const s = await svc.connect({ eventUuid: "ev-b", apiKey: LIVE_KEY, createdBy: "u2" });
+  assert.equal(s.id, "opc_1");
+  assert.equal(opa.calls.filter((c) => c[0] === "createWebhookEndpoint").length, 1);
+  assert.equal(db.state.connections.length, 1);
+  assert.equal(db.state.events[1].connection_id, db.state.connections[0].id);
+});
+
+test("outra chave da mesma empresa: conexão própria; a da outra comunidade não muda de chave", async () => {
   const opa = fakeOpa({ accounts: { [LIVE_KEY]: { company: company() }, [LIVE_KEY_2]: { company: company() } } });
   const { svc, db } = setup({ opa });
   await svc.connect({ eventUuid: "ev-a", apiKey: LIVE_KEY, createdBy: "u1" });
   const s = await svc.connect({ eventUuid: "ev-b", apiKey: LIVE_KEY_2, createdBy: "u2" });
-
-  assert.equal(s.id, "opc_1");
+  assert.equal(s.id, "opc_2");
   assert.equal(s.key_last4, "9876");
-  assert.equal(opa.calls.filter((c) => c[0] === "createWebhookEndpoint").length, 1);
-  assert.equal(db.state.connections.length, 1);
-  assert.equal(db.state.events[1].connection_id, db.state.connections[0].id);
-  assert.equal(svc.clientFor(db.state.connections[0]).apiKey, LIVE_KEY_2);
+  assert.equal(db.state.connections.length, 2);
+  assert.equal(svc.clientFor(db.state.connections[0]).apiKey, LIVE_KEY, "a chave do evento A continua a mesma");
+  assert.equal(db.state.connections[0].status, "active");
+  assert.equal(db.state.events[0].connection_id, db.state.connections[0].id);
 });
 
-test("mesma empresa mas o endpoint antigo sumiu: cria conexão nova", async () => {
+test("mesma chave mas o endpoint antigo sumiu: conexão nova, a antiga desativada e os eventos movidos", async () => {
   const opa = fakeOpa({ accounts: { [LIVE_KEY]: { company: company() } } });
   const { svc, db } = setup({ opa });
   await svc.connect({ eventUuid: "ev-a", apiKey: LIVE_KEY, createdBy: "u" });
@@ -270,6 +311,10 @@ test("mesma empresa mas o endpoint antigo sumiu: cria conexão nova", async () =
   const s = await svc.connect({ eventUuid: "ev-b", apiKey: LIVE_KEY, createdBy: "u" });
   assert.equal(s.id, "opc_2");
   assert.equal(db.state.connections.length, 2);
+  assert.equal(db.state.connections[0].status, "disabled");
+  assert.equal(db.state.events[0].connection_id, db.state.connections[1].id, "ev-a passou para a nova");
+  assert.deepEqual((await svc.list()).map((c) => c.id), ["opc_2"]);
+  await assert.rejects(svc.attach({ eventUuid: "ev-a", publicId: "opc_1" }), (e) => e.code === "CONNECTION_NOT_FOUND");
   // O próximo evento da mesma empresa reaproveita a mais nova, não cria uma terceira.
   db.addEvent({ uuid: "ev-c" });
   const again = await svc.connect({ eventUuid: "ev-c", apiKey: LIVE_KEY, createdBy: "u" });
@@ -302,6 +347,13 @@ test("attach: liga uma conexão existente a outro evento; conexão inexistente �
   assert.equal(s.id, "opc_1");
   assert.equal(db.state.events[1].connection_id, db.state.connections[0].id);
   await assert.rejects(svc.attach({ eventUuid: "ev-b", publicId: "opc_x" }), (e) => e.code === "CONNECTION_NOT_FOUND");
+});
+
+test("detach sem conta: CONNECTION_NOT_FOUND e o legado fica", async () => {
+  const { svc, db } = setup();
+  db.addEvent({ uuid: "ev-legado", legacy: true });
+  await assert.rejects(svc.detach({ eventUuid: "ev-legado" }), (e) => e.code === "CONNECTION_NOT_FOUND");
+  assert.deepEqual(await svc.forEvent("ev-legado"), { connection: null, legacy: true });
 });
 
 test("detach: bloqueado com pagamento em aberto; depois solta o evento e tira o legado", async () => {

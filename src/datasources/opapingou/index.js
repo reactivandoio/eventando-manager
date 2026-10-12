@@ -168,6 +168,14 @@ const createOpaPingou = ({
       }
       return missing;
     },
+    async listWebhookEndpoints() {
+      const data = (await request("GET", "/v1/webhook-endpoints")).data;
+      return Array.isArray(data && data.items) ? data.items : [];
+    },
+    // Novo whsec_ para um endpoint que já existe (devolvido só aqui). Sem repetir: cada chamada troca.
+    async rotateWebhookSecret(id) {
+      return (await request("POST", `/v1/webhook-endpoints/${encodeURIComponent(id)}/rotate-secret`, { retry: false })).data;
+    },
     async getWebhookEndpoint(id) {
       return (await request("GET", `/v1/webhook-endpoints/${encodeURIComponent(id)}`)).data;
     },

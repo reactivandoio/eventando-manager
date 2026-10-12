@@ -187,3 +187,38 @@ test("REA-12: cobrança que não é da conta do webhook (404): ignora e alerta, 
   assert.equal(db.payments[0].status, "PEDING_PAYMENT");
   assert.ok(alerts.some((m) => m.includes("ch_1")));
 });
+
+const notFound = () => Object.assign(new Error("404"), { status: 404, code: "NOT_FOUND" });
+
+test("REA-12: 404 na conta do webhook e o pagamento é de outra conta: reconsulta pela conta do pagamento", async () => {
+  const db = memoryDb({
+    events: [ev({ connection: { id: 5 } })],
+    payments: [pending({ opapingou_connection: { id: 9 } })],
+  });
+  const asked = [];
+  const run = createProcessor({
+    db,
+    opapingouFor: () => ({ getCharge: async () => { asked.push("webhook"); throw notFound(); } }),
+    opapingouForPayment: (p) => ({ getCharge: async () => { asked.push(`payment:${p.opapingou_connection.id}`); return { status: "PAID" }; } }),
+    log: { error() {}, info() {} },
+    env: {},
+  });
+  const r = await run("evt_1");
+  assert.equal(r.body.transitioned, true);
+  assert.deepEqual(asked, ["webhook", "payment:9"]);
+});
+
+test("REA-12: mesma conta no webhook e no pagamento: 404 não tenta de novo", async () => {
+  const db = memoryDb({ events: [ev({ connection: { id: 5 } })], payments: [pending({ opapingou_connection: { id: 5 } })] });
+  let second = 0;
+  const run = createProcessor({
+    db,
+    opapingouFor: () => ({ getCharge: async () => { throw notFound(); } }),
+    opapingouForPayment: () => ({ getCharge: async () => { second += 1; return { status: "PAID" }; } }),
+    log: { error() {}, info() {} },
+    env: {},
+  });
+  const r = await run("evt_1");
+  assert.equal(r.body.reason, "charge_not_in_account");
+  assert.equal(second, 0);
+});

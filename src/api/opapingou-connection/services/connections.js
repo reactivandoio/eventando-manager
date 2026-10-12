@@ -122,15 +122,37 @@ const createConnections = ({
     return event;
   };
 
-  // Mesma empresa e modo já conectados: o endpoint ainda existe e esta chave o enxerga?
-  const reusable = async (client, existing) => {
-    if (!existing || !existing.webhook_endpoint_id || !existing.webhook_secret_encrypted) return false;
+  // A conexão guarda exatamente esta chave? (Cifrada com outra chave mestra: não dá para saber, não é.)
+  const holdsKey = (connection, key) => {
+    try {
+      return box.open(connection.key_encrypted, keyContext(connection.public_id)) === key;
+    } catch (err) {
+      return false;
+    }
+  };
+
+  // O endpoint da conexão ainda existe e está ativo?
+  const endpointAlive = async (client, existing) => {
+    if (!existing.webhook_endpoint_id || !existing.webhook_secret_encrypted) return false;
     try {
       const ep = await client.getWebhookEndpoint(existing.webhook_endpoint_id);
       return !!ep && ep.status === "ACTIVE";
     } catch (err) {
       if (err instanceof OpaPingouError && (err.status === 404 || err.status === 403)) return false;
       throw fromOpa(err, "reuse");
+    }
+  };
+
+  const recover = async (client, url) => {
+    try {
+      const found = (await client.listWebhookEndpoints()).find((ep) => ep && ep.url === url);
+      if (!found) return null;
+      const rotated = await client.rotateWebhookSecret(found.id);
+      log.info(`[opapingou] endpoint ${found.id} recuperado depois de falha no cadastro`);
+      return rotated;
+    } catch (err) {
+      log.error(`[ALERTA][opapingou] cadastro do endpoint ${url.split("/").pop()} ficou incerto; conferir no painel do Opa Pingou`);
+      return null;
     }
   };
 
@@ -148,16 +170,22 @@ const createConnections = ({
       created_by_name: createdByName || null,
     });
 
+    const url = `${webhookBase()}/${publicId}`;
     let endpoint;
     try {
       endpoint = await client.createWebhookEndpoint({
-        url: `${webhookBase()}/${publicId}`,
+        url,
         description: "Hub Community - inscrições pagas",
         events: WEBHOOK_EVENTS,
       });
     } catch (err) {
-      await db.deleteConnection(row.id);
-      throw fromOpa(err, "endpoint");
+      // Rede caída ou 5xx: o cadastro pode ter chegado. Procura pela URL e, se achar, pega um
+      // segredo novo com rotate-secret, em vez de deixar um endpoint órfão gastando o limite de 10.
+      endpoint = fromOpa(err, "endpoint").code === "OPAPINGOU_UNAVAILABLE" ? await recover(client, url) : null;
+      if (!endpoint) {
+        await db.deleteConnection(row.id);
+        throw fromOpa(err, "endpoint");
+      }
     }
 
     const secret = endpoint && typeof endpoint.secret === "string" ? endpoint.secret : "";
@@ -241,18 +269,26 @@ const createConnections = ({
         company_document: maskCnpj(company.cnpj),
       };
 
+      // Reaproveita só a conexão que já guarda esta mesma chave: trocar a chave de uma conexão
+      // compartilhada mudaria a conta de outros eventos, e uma chave restrita a outras contas
+      // bancárias deixaria os Pix deles sem confirmação. Chave diferente, conexão própria.
+      const sameKey = (await db.findActiveConnectionsByCompany(companyInfo.company_id, testMode)).find((c) =>
+        holdsKey(c, key)
+      );
       let connection;
-      const existing = await db.findActiveConnectionByCompany(companyInfo.company_id, testMode);
-      if (await reusable(client, existing)) {
-        connection = await db.updateConnection(existing.id, {
-          ...companyInfo,
-          key_last4: key.slice(-4),
-          key_encrypted: box.seal(key, keyContext(existing.public_id)),
-        });
-        log.info(`[opapingou] conexão ${existing.public_id} reaproveitada para o evento ${event.uuid}`);
+      if (sameKey && (await endpointAlive(client, sameKey))) {
+        connection = sameKey;
+        log.info(`[opapingou] conexão ${sameKey.public_id} reaproveitada para o evento ${event.uuid}`);
       } else {
         connection = await createNew({ client, apiKey: key, companyInfo, testMode, createdBy, createdByName });
         log.info(`[opapingou] conexão ${connection.public_id} criada para o evento ${event.uuid}`);
+        if (sameKey) {
+          // O endpoint da antiga sumiu: ela sai de uso e os eventos dela passam para a nova. Os
+          // pagamentos continuam lembrando a antiga, cuja chave é a mesma.
+          await db.updateConnection(sameKey.id, { status: "disabled" });
+          await db.moveEvents(sameKey.id, connection.id);
+          log.info(`[opapingou] conexão ${sameKey.public_id} desativada; eventos movidos para ${connection.public_id}`);
+        }
       }
 
       await db.setEventConnection(event.id, connection.id);
@@ -271,6 +307,8 @@ const createConnections = ({
     // pagando agora e a tela ficaria dizendo que o evento não tem conta.
     async detach({ eventUuid }) {
       const event = await loadEvent(eventUuid);
+      // Sem conta não há o que remover; evento legado continua na chave global.
+      if (!event.opapingou_connection) throw new ConnectionError("CONNECTION_NOT_FOUND");
       const open = await db.countOpenPayments(event.id, now());
       if (open > 0) throw new ConnectionError("PENDING_PAYMENTS", { count: open });
       await db.setEventConnection(event.id, null, { opapingou_legacy: false });
@@ -305,9 +343,16 @@ const strapiConnectionsDb = (strapi) => {
     setEventConnection: (eventId, connectionId, extra = {}) =>
       events().update({ where: { id: eventId }, data: { opapingou_connection: connectionId, ...extra } }),
     findConnectionByPublicId: (publicId) => conns().findOne({ where: { public_id: publicId } }),
-    // A mais recente: se o endpoint de uma conexão sumiu, a seguinte da mesma empresa é a que vale.
-    findActiveConnectionByCompany: (companyId, testMode) =>
-      conns().findOne({ where: { company_id: companyId, test_mode: testMode, status: "active" }, orderBy: { id: "desc" } }),
+    findActiveConnectionsByCompany: (companyId, testMode) =>
+      conns().findMany({ where: { company_id: companyId, test_mode: testMode, status: "active" }, orderBy: { id: "desc" } }),
+    // updateMany do Strapi não mexe em relação: um a um.
+    moveEvents: async (fromId, toId) => {
+      const rows = await events().findMany({ where: { opapingou_connection: { id: fromId } }, select: ["id"] });
+      for (const row of rows) {
+        await events().update({ where: { id: row.id }, data: { opapingou_connection: toId } });
+      }
+      return rows.length;
+    },
     createConnection: (data) => conns().create({ data }),
     updateConnection: (id, data) => conns().update({ where: { id }, data }),
     deleteConnection: (id) => conns().delete({ where: { id } }),

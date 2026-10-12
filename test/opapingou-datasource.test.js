@@ -266,3 +266,14 @@ test("missingScopes: chave recusada (401) é erro, não escopo faltando", async 
   const { op } = setup([{ status: 401, data: { code: "API_KEY_INVALID" } }]);
   await assert.rejects(op.missingScopes(), (err) => err.status === 401);
 });
+
+test("lista endpoints e rotaciona o segredo sem repetir", async () => {
+  const { op, http } = setup([
+    { status: 200, data: { items: [{ id: "we_1", url: "https://x/opc_1" }] } },
+    { status: 503, data: { code: "UNAVAILABLE" } },
+  ]);
+  assert.deepEqual(await op.listWebhookEndpoints(), [{ id: "we_1", url: "https://x/opc_1" }]);
+  await assert.rejects(op.rotateWebhookSecret("we_1"), (e) => e.status === 503);
+  assert.equal(http.calls.length, 2);
+  assert.equal(http.calls[1].url, "https://op.test/v1/webhook-endpoints/we_1/rotate-secret");
+});

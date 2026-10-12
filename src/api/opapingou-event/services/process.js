@@ -34,10 +34,15 @@ const publicPayment = (p) =>
 // opapingouFor(row): cliente da conta que mandou o webhook (REA-12: a conexão gravada com o evento;
 // sem conexão, a chave global). A reconsulta usa essa conta, então a assinatura válida de uma
 // empresa não move a cobrança de outra: o Opa Pingou responde 404 para cobrança fora da conta.
+// opapingouForPayment(payment): cliente da conta que o pagamento guardou. Usado só quando a conta do
+// webhook responde 404 e é outra (ex.: a mesma empresa com outra chave, restrita a outras contas
+// bancárias). O status vem sempre da reconsulta, nunca do corpo do webhook.
+const connectionIdOf = (c) => (c && c.id) || null;
 const createProcessor = ({
   db,
   opapingou,
   opapingouFor = () => opapingou,
+  opapingouForPayment = null,
   log,
   env = process.env,
   now = () => new Date(),
@@ -77,7 +82,13 @@ const createProcessor = ({
 
     let charge;
     try {
-      charge = await (await opapingouFor(row)).getCharge(chargeId);
+      try {
+        charge = await (await opapingouFor(row)).getCharge(chargeId);
+      } catch (err) {
+        const other = connectionIdOf(payment.opapingou_connection) !== connectionIdOf(row.connection);
+        if (!(err && err.status === 404 && opapingouForPayment && other)) throw err;
+        charge = await (await opapingouForPayment(payment)).getCharge(chargeId);
+      }
     } catch (err) {
       if (err && err.status === 404) {
         alert(`cobrança ${chargeId} do evento ${row.event_id} não existe na conta que mandou o webhook`);
@@ -121,7 +132,7 @@ const createProcessor = ({
 const strapiDb = (strapi) => {
   const payments = () => strapi.db.query("api::payment.payment");
   const events = () => strapi.db.query("api::opapingou-event.opapingou-event");
-  const populate = { signup: true, event: true };
+  const populate = { signup: true, event: true, opapingou_connection: true };
   return {
     findEvent: (eventId) => events().findOne({ where: { event_id: String(eventId) }, populate: { connection: true } }),
     updateEvent: (id, data) => events().update({ where: { id }, data }),

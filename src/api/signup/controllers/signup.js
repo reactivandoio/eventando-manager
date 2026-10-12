@@ -66,6 +66,12 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
         idempotencyKey: payment.provider_idempotency_key,
       }));
     } catch (err) {
+      if (err && err.name === "SecretBoxError") {
+        // Chave mestra ausente ou trocada: nada foi criado no Opa Pingou e não é culpa da pessoa.
+        // Não cancela; o pendente fica para a nova tentativa depois de corrigir a configuração.
+        strapi.log.error(`[ALERTA][opapingou] cofre de credenciais indisponível ao cobrar o pagamento ${payment.id}: ${err.code}`);
+        return { error: { status: 503, message: RETRY_MESSAGE } };
+      }
       const code = err && err.code ? err.code : "UNKNOWN";
       strapi.log.warn(
         `[signup] cobrança do pagamento ${payment.id} falhou: code=${code} requestId=${(err && err.requestId) || "-"}`

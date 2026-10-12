@@ -63,6 +63,7 @@ module.exports = createCoreController(UID, ({ strapi }) => ({
     const run = createProcessor({
       db: strapiDb(strapi),
       opapingouFor: (row) => connections.clientFor((row && row.connection) || null),
+      opapingouForPayment: (payment) => connections.clientFor((payment && payment.opapingou_connection) || null),
       log: strapi.log,
     });
     const { httpStatus, body } = await run(ctx.params.eventId);
