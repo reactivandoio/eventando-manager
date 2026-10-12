@@ -62,8 +62,8 @@ test("janela do cupom: datas vazias usam o período do lote", () => {
   assert.deepEqual(w, { startsAt: new Date("2026-01-10T00:00:00Z"), endsAt: null });
 });
 
-test("mínimo por provedor, padrão 1", () => {
-  assert.equal(minChargeFor("opapingou", {}), 1);
-  assert.equal(minChargeFor("opapingou", { OPAPINGOU_MIN_CHARGE_CENTS: "50" }), 50);
-  assert.equal(minChargeFor("pixai", { PIXAI_MIN_CHARGE_CENTS: "x" }), 1);
+test("mínimo de cobrança do Opa Pingou, padrão 1", () => {
+  assert.equal(minChargeFor({}), 1);
+  assert.equal(minChargeFor({ OPAPINGOU_MIN_CHARGE_CENTS: "50" }), 50);
+  assert.equal(minChargeFor({ OPAPINGOU_MIN_CHARGE_CENTS: "x" }), 1);
 });

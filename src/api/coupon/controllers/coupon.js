@@ -5,7 +5,6 @@
  */
 
 const { createCoreController } = require("@strapi/strapi").factories;
-const { isEnabled } = require("../../../datasources/opapingou");
 const { normalizeCpf } = require("../../../utils/cpf");
 const { quote } = require("../../signup/services/reserve");
 
@@ -18,12 +17,8 @@ module.exports = createCoreController("api::coupon.coupon", ({ strapi }) => ({
     if (!Number.isInteger(eventId) || eventId <= 0) {
       return ctx.send({ valid: false, message: "Evento inválido." }, 400);
     }
-    const event = await strapi.db.query("api::event.event").findOne({
-      where: { id: eventId },
-      select: ["id", "payment_provider"],
-    });
+    const event = await strapi.db.query("api::event.event").findOne({ where: { id: eventId }, select: ["id"] });
     if (!event) return ctx.send({ valid: false, message: "Evento não encontrado." }, 404);
-    const provider = isEnabled() && event.payment_provider === "opapingou" ? "opapingou" : "pixai";
     const cpf = body.cpf ? normalizeCpf(body.cpf) : null;
 
     const q = await quote({
@@ -32,7 +27,6 @@ module.exports = createCoreController("api::coupon.coupon", ({ strapi }) => ({
       couponCode: body.code,
       isStudent: body.is_student,
       cpf,
-      provider,
     });
     if (q.error) return ctx.send({ valid: false, message: q.error.message }, 200);
 

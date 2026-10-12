@@ -6,7 +6,6 @@
 
 const { createCoreController } = require("@strapi/strapi").factories;
 
-const PixAiIntegration = require("../../../datasources/pixai");
 const { createOpaPingou, isEnabled } = require("../../../datasources/opapingou");
 const { normalizeCpf } = require("../../../utils/cpf");
 const { reserveSignup } = require("../services/reserve");
@@ -86,34 +85,6 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
     }
   };
 
-  // Pix Aí: mesma reserva; a cobrança é criada depois da trava, como a do Opa Pingou.
-  const createPixAiCharge = async ({ payment, event, signup }) => {
-    try {
-      const response = await PixAiIntegration.createPayment({
-        description: `Inscrição no evento ${event.name}: ${signup.name} - ${signup.email}`,
-        value: Number(payment.value),
-        token: event.pixai_token_integration,
-      });
-      const updated = await paymentQuery().update({
-        where: { id: payment.id },
-        data: {
-          payment_identification: response.localPayment.payment_identification,
-          pix_qr_code: response.localPayment.pix_qr_code,
-          payment_link: response.localPayment.payment_link,
-          payment_data: response,
-        },
-      });
-      return { payment: updated };
-    } catch (err) {
-      strapi.log.error("[signup] Pix Aí: falha ao criar o pagamento");
-      await paymentQuery().updateMany({
-        where: { id: payment.id, status: "PEDING_PAYMENT" },
-        data: { status: "CANCELED", canceled_at: new Date() },
-      });
-      return { error: { status: 400, message: "Erro na integração de pagamento." } };
-    }
-  };
-
   return {
     async customCreate(ctx) {
       const eventId = Number(ctx.params.id);
@@ -131,16 +102,12 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
       }
 
       const kind = KINDS.includes(body.kind) ? body.kind : "PIX_QR";
-      const event = await strapi.db.query("api::event.event").findOne({
-        where: { id: eventId },
-        select: ["id", "payment_provider"],
-      });
-      if (!event) return ctx.send({ status: "error", message: "Evento não encontrado." }, 404);
-      const provider = isEnabled() && event.payment_provider === "opapingou" ? "opapingou" : "pixai";
 
+      // O Opa Pingou é o único provedor (REA-15); a flag OPAPINGOU_ENABLED vira chave de
+      // emergência: desligada, só a inscrição gratuita passa.
       let reserved;
       try {
-        reserved = await reserveSignup({ eventId, body, cpf, provider, kind });
+        reserved = await reserveSignup({ eventId, body, cpf, kind, paidEnabled: isEnabled() });
       } catch (err) {
         strapi.log.error(`[signup] falha ao reservar a inscrição: ${err && err.message}`);
         return ctx.send({ status: "error", message: "Falha ao criar inscrição." }, 400);
@@ -153,10 +120,7 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
       const { signup, priced, minChargeCents } = reserved;
       const fullEvent = await strapi.db.query("api::event.event").findOne({ where: { id: eventId } });
       if (reserved.needsCharge) {
-        const created =
-          provider === "opapingou"
-            ? await createOpaCharge({ payment, event: fullEvent, signup })
-            : await createPixAiCharge({ payment, event: fullEvent, signup });
+        const created = await createOpaCharge({ payment, event: fullEvent, signup });
         if (created.error) {
           return ctx.send({ status: "error", message: created.error.message }, created.error.status);
         }
@@ -169,10 +133,9 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
           ...publicSignup(signup),
           signup_id: signup.id,
           payment_id: payment.id,
-          payment_provider: isFree ? null : provider,
+          payment_provider: isFree ? null : "opapingou",
           kind: payment.kind || null,
           status: payment.status,
-          qr_code: payment.pix_qr_code || null,
           pix_br_code: payment.pix_br_code || null,
           payment_link: payment.payment_link || null,
           expires_at: payment.expires_at || null,
