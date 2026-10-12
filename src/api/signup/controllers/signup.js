@@ -185,6 +185,7 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
             name: holder.name || null,
             payment_status: p ? p.status : null,
             kind: p ? p.kind || null : null,
+            value: p ? Number(p.value) || 0 : 0,
           },
         },
         200

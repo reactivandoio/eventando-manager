@@ -315,6 +315,7 @@ const processEvent = async (strapi, body) => {
     assert.equal(byCpf.status, 200);
     assert.equal(byCpf.body.holder.email, p.email);
     assert.equal(byCpf.body.holder.payment_status, "PEDING_PAYMENT");
+    assert.equal(byCpf.body.holder.value, 1000);
     assert.ok(!JSON.stringify(byCpf.body).includes(p.cpf));
     const byEmail = await holderCall(event.id, { emails: [p.email.toUpperCase()] });
     assert.equal(byEmail.body.holder.signup_id, r.body.signup_id);
