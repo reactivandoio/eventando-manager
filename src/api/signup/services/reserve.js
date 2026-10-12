@@ -13,6 +13,11 @@
 const { price, couponWindow, minChargeFor } = require("../../../utils/pricing");
 
 const ACTIVE = ["CONFIRMED", "PEDING_PAYMENT"];
+// O que ocupa vaga e conta uso de cupom: confirmado, ou pendente com prazo (Pix do Opa Pingou).
+// Pendente sem expires_at é Pix Aí antigo, que nunca vai ser pago (REA-15; mesma regra do BFF).
+const ACTIVE_WHERE = {
+  $or: [{ status: "CONFIRMED" }, { status: "PEDING_PAYMENT", expires_at: { $notNull: true } }],
+};
 const RESERVATION_MS = 15 * 60 * 1000; // FIFTEEN_MIN, igual à validade do Pix
 const PROVIDER = "opapingou";
 
@@ -64,7 +69,7 @@ const checkCoupon = async ({ code, eventId, batch, cpf, now = new Date(), ignore
   const notThis = ignorePaymentId ? { id: { $ne: ignorePaymentId } } : {};
   if (coupon.max_uses) {
     const uses = await strapi.db.query("api::payment.payment").count({
-      where: { coupon: coupon.id, status: { $in: ACTIVE }, ...notThis },
+      where: { coupon: coupon.id, ...ACTIVE_WHERE, ...notThis },
     });
     if (uses >= coupon.max_uses) return { message: "Este cupom atingiu o limite de usos." };
   }
@@ -74,7 +79,7 @@ const checkCoupon = async ({ code, eventId, batch, cpf, now = new Date(), ignore
       where: {
         event: eventId,
         coupon: { id: { $notNull: true } },
-        status: { $in: ACTIVE },
+        ...ACTIVE_WHERE,
         signup: { cpf },
         ...notThis,
       },
@@ -134,13 +139,13 @@ const checkCapacity = async ({ batch, event, ignorePaymentId = null }) => {
   const notThis = ignorePaymentId ? { id: { $ne: ignorePaymentId } } : {};
   if (batch.max_quantity) {
     const used = await strapi.db.query("api::payment.payment").count({
-      where: { batch: batch.id, status: { $in: ACTIVE }, ...notThis },
+      where: { batch: batch.id, ...ACTIVE_WHERE, ...notThis },
     });
     if (used >= batch.max_quantity) return "As vagas para este lote esgotaram.";
   }
   if (event.max_slots) {
     const used = await strapi.db.query("api::payment.payment").count({
-      where: { event: event.id, status: { $in: ACTIVE }, ...notThis },
+      where: { event: event.id, ...ACTIVE_WHERE, ...notThis },
     });
     if (used >= event.max_slots) return "Este evento já atingiu a lotação máxima.";
   }

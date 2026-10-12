@@ -367,6 +367,17 @@ const processEvent = async (strapi, body) => {
     assert.equal(pay.pix_qr_code, null);
   });
 
+  await check("REA-15: pendente antigo do Pix Aí não ocupa vaga nem conta uso de cupom", async () => {
+    const { event, batch } = await mkEvent({ max_slots: 1 });
+    const coupon = await q("api::coupon.coupon").create({ data: { code: `L${tag}`, discount_percentage: 10, max_uses: 1, enabled: true, event: event.id } });
+    await q("api::payment.payment").create({
+      data: { value: 900, status: "PEDING_PAYMENT", event: event.id, batch: batch.id, coupon: coupon.id, payment_identification: `legacy_slot_${tag}` },
+    });
+    const r = await call(strapi, event.id, { ...person((seq += 20)), batch_id: batch.id, coupon_code: `L${tag}` });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.discount_kind, "coupon");
+  });
+
   await check("REA-15: confirmado antigo do Pix Aí continua inscrito", async () => {
     const { event, batch } = await mkEvent();
     const p = person((seq += 20));
