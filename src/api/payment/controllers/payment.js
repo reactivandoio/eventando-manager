@@ -126,7 +126,7 @@ module.exports = createCoreController("api::payment.payment", ({ strapi }) => {
           return ctx.send("Error on update payment", 400);
         }
 
-        return ctx.send({ paymentEntry }, 200);
+        return ctx.send({ status: "CONFIRMED", payment_id: paymentEntry.id }, 200);
       }
 
       return ctx.send({ message: "event not found" }, 404);
