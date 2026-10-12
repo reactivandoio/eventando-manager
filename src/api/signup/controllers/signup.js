@@ -9,6 +9,7 @@ const { createCoreController } = require("@strapi/strapi").factories;
 const { createOpaPingou, isEnabled } = require("../../../datasources/opapingou");
 const { normalizeCpf } = require("../../../utils/cpf");
 const { reserveSignup } = require("../services/reserve");
+const { pickHolder, normalizeEmail } = require("../../../utils/signup-holder");
 const { createSecretBox } = require("../../../utils/secret-box");
 const { createConnections, strapiConnectionsDb } = require("../../opapingou-connection/services/connections");
 
@@ -137,7 +138,8 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
         return ctx.send({ status: "error", message: "Falha ao criar inscrição." }, 400);
       }
       if (reserved.error) {
-        return ctx.send({ status: "error", message: reserved.error.message }, reserved.error.status);
+        const { message, status, code } = reserved.error;
+        return ctx.send({ status: "error", message, ...(code ? { code } : {}) }, status);
       }
 
       let { payment } = reserved;
@@ -170,6 +172,45 @@ module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
           min_charge_applied: !!priced.minApplied,
           min_charge_cents: minChargeCents,
           is_free: isFree,
+        },
+        200
+      );
+    },
+
+    // REA-22: quem já tem a inscrição do evento, pelo CPF ou por um dos e-mails. Só o BFF
+    // (token de API) chega aqui: a resposta traz o e-mail, que o BFF usa para reenviar a
+    // confirmação e só mostra mascarado. O CPF nunca volta.
+    async holder(ctx) {
+      const eventId = Number(ctx.params.id);
+      const body = ctx.request.body || {};
+      if (!Number.isInteger(eventId) || eventId <= 0) {
+        return ctx.send({ status: "error", message: "Evento inválido." }, 400);
+      }
+      const cpf = body.cpf ? normalizeCpf(body.cpf) : null;
+      const emails = [...new Set((Array.isArray(body.emails) ? body.emails : []).map(normalizeEmail).filter(Boolean))].slice(0, 5);
+      if (!cpf && emails.length === 0) return ctx.send({ holder: null }, 200);
+
+      const or = [];
+      if (cpf) or.push({ cpf });
+      emails.forEach((email) => or.push({ email: { $eqi: email } }));
+      const signups = await strapi.db.query("api::signup.signup").findMany({
+        where: { event: eventId, $or: or },
+        populate: { payment: true },
+        orderBy: { id: "asc" },
+      });
+      const holder = pickHolder(signups);
+      if (!holder) return ctx.send({ holder: null }, 200);
+      const p = holder.payment;
+      return ctx.send(
+        {
+          holder: {
+            signup_id: holder.id,
+            email: holder.email,
+            name: holder.name || null,
+            payment_status: p ? p.status : null,
+            kind: p ? p.kind || null : null,
+            value: p ? Number(p.value) || 0 : 0,
+          },
         },
         200
       );

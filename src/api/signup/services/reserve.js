@@ -11,6 +11,7 @@
 // já gravou.
 
 const { price, couponWindow, minChargeFor } = require("../../../utils/pricing");
+const { pickHolder } = require("../../../utils/signup-holder");
 const { chargeConnectionFor } = require("../../opapingou-connection/services/connections");
 
 const ACTIVE = ["CONFIRMED", "PEDING_PAYMENT"];
@@ -22,7 +23,11 @@ const ACTIVE_WHERE = {
 const RESERVATION_MS = 15 * 60 * 1000; // FIFTEEN_MIN, igual à validade do Pix
 const PROVIDER = "opapingou";
 
-const fail = (message, status = 400) => ({ error: { status, message } });
+const fail = (message, status = 400, code) => ({ error: { status, message, ...(code ? { code } : {}) } });
+
+// REA-22: o BFF reconhece pelo código e reenvia a confirmação a quem já tem a inscrição.
+const ALREADY_SIGNED_UP = "ALREADY_SIGNED_UP";
+const alreadySignedUp = () => fail("Você já está inscrito neste evento!", 400, ALREADY_SIGNED_UP);
 const NO_ACCOUNT_MESSAGE =
   "Este evento ainda não está recebendo pagamentos. Fale com a organização do evento.";
 
@@ -220,7 +225,7 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
       const retryable = p && (p.status === "EXPIRED" || p.status === "CANCELED" || legacyPending);
       const openOpa = p && p.status === "PEDING_PAYMENT" && p.provider === PROVIDER;
       if (!retryable && !openOpa) {
-        return fail("Você já está inscrito neste evento!");
+        return alreadySignedUp();
       }
       if (openOpa) {
         if ((p.kind || "PIX_QR") === kind) {
@@ -245,6 +250,13 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
         // Trocar Pix por link (ou o contrário) é nova tentativa.
       }
       retryPayment = p; // EXPIRED, CANCELED ou troca de meio: nova tentativa na mesma inscrição
+    } else if (cpf) {
+      // REA-22: o mesmo CPF com outro e-mail não ganha uma segunda inscrição no evento.
+      const sameCpf = await strapi.db.query("api::signup.signup").findMany({
+        where: { cpf, event: eventId },
+        populate: { payment: true },
+      });
+      if (pickHolder(sameCpf, now)) return alreadySignedUp();
     }
 
     // 4. Preço e regras (lote, janela, cupom, CPF) e vagas.
@@ -344,4 +356,4 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
     };
   });
 
-module.exports = { reserveSignup, quote, checkCoupon, checkCapacity, idempotencyKey, ACTIVE };
+module.exports = { reserveSignup, quote, checkCoupon, checkCapacity, idempotencyKey, ACTIVE, ALREADY_SIGNED_UP };

@@ -310,15 +310,59 @@ const processEvent = async (strapi, body) => {
     const cpf = cpfFrom((seq += 20));
     const first = await call(strapi, event.id, { name: "X", email: `x1-${tag}@x.test`, cpf, batch_id: batch.id, coupon_code: `A${tag}` });
     assert.equal(first.status, 200);
+    // REA-22: com a primeira inscrição segurando a vaga, o mesmo CPF já nem ganha outra.
     const second = await call(strapi, event.id, { name: "X", email: `x2-${tag}@x.test`, cpf, batch_id: batch.id, coupon_code: `A${tag}` });
     assert.equal(second.status, 400);
-    assert.match(second.body.message, /já usou um cupom/);
+    assert.equal(second.body.code, "ALREADY_SIGNED_UP");
+    // Com o Pix da primeira vencido, a vaga e o cupom voltam e o CPF se inscreve com outro cupom.
+    await q("api::payment.payment").update({ where: { id: first.body.payment_id }, data: { expires_at: new Date(Date.now() - 1000) } });
+    const third = await call(strapi, event.id, { name: "X", email: `x3-${tag}@x.test`, cpf, batch_id: batch.id, coupon_code: `B${tag}` });
+    assert.equal(third.status, 200, JSON.stringify(third.body));
     const tie = await call(strapi, event.id, { ...person(seq + 3), batch_id: batch.id, coupon_code: `B${tag}`, is_student: true });
     assert.equal(tie.status, 200);
     assert.equal(tie.body.discount_kind, "student");
     assert.equal(tie.body.value, 500);
     const pay = await q("api::payment.payment").findOne({ where: { id: tie.body.payment_id }, populate: { coupon: true } });
     assert.equal(pay.coupon, null);
+  });
+
+  await check("REA-22: mesmo CPF com outro e-mail → ALREADY_SIGNED_UP e 1 inscrição (também ao mesmo tempo)", async () => {
+    const { event, batch } = await mkEvent({ value: 0 });
+    const cpf = cpfFrom((seq += 20));
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) => call(strapi, event.id, { name: "Z", email: `z${i}-${tag}@x.test`, cpf, batch_id: batch.id }))
+    );
+    assert.equal(results.filter((r) => r.status === 200).length, 1, JSON.stringify(results.map((r) => [r.status, r.body.code])));
+    assert.ok(results.filter((r) => r.status !== 200).every((r) => r.body.code === "ALREADY_SIGNED_UP"));
+    assert.equal(await q("api::signup.signup").count({ where: { event: event.id } }), 1);
+    const sameEmail = await call(strapi, event.id, { name: "Z", email: results.find((r) => r.status === 200).body.email, cpf, batch_id: batch.id });
+    assert.equal(sameEmail.body.code, "ALREADY_SIGNED_UP");
+  });
+
+  await check("REA-22: signup-holder acha pelo CPF ou e-mail, traz o e-mail e nunca o CPF; vencido não conta", async () => {
+    const holderCall = async (eventId, body) => {
+      const out = {};
+      await strapi.controller("api::signup.signup").holder({
+        params: { id: String(eventId) },
+        request: { body },
+        send(payload, status) { out.status = status; out.body = payload; },
+      });
+      return out;
+    };
+    const { event, batch } = await mkEvent();
+    const p = person((seq += 20));
+    const r = await call(strapi, event.id, { ...p, batch_id: batch.id });
+    const byCpf = await holderCall(event.id, { cpf: p.cpf });
+    assert.equal(byCpf.status, 200);
+    assert.equal(byCpf.body.holder.email, p.email);
+    assert.equal(byCpf.body.holder.payment_status, "PEDING_PAYMENT");
+    assert.equal(byCpf.body.holder.value, 1000);
+    assert.ok(!JSON.stringify(byCpf.body).includes(p.cpf));
+    const byEmail = await holderCall(event.id, { emails: [p.email.toUpperCase()] });
+    assert.equal(byEmail.body.holder.signup_id, r.body.signup_id);
+    await q("api::payment.payment").update({ where: { id: r.body.payment_id }, data: { expires_at: new Date(Date.now() - 1000) } });
+    assert.equal((await holderCall(event.id, { cpf: p.cpf })).body.holder, null);
+    assert.equal((await holderCall(event.id, {})).body.holder, null);
   });
 
   await check("CPF inválido ou ausente com cupom → 400 com 'CPF' e sem ecoar o valor", async () => {
