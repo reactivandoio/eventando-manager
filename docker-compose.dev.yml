@@ -1,0 +1,67 @@
+# Ambiente de desenvolvimento do Eventando (REA-21), com MySQL. Use pelo Makefile:
+# make dev, make test, make build. Configuração no .env.dev; veja .env.dev.example.
+name: eventando-dev
+
+services:
+  eventando:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        NODE_VERSION: ${EVENTANDO_NODE_VERSION:?use o Makefile (make dev), que lê o .nvmrc}
+    image: eventando-dev
+    user: '${DEV_UID:-1000}:${DEV_GID:-1000}'
+    command: sh -c "yarn install --frozen-lockfile --network-timeout 600000 && yarn develop"
+    env_file: .env.dev
+    # O banco é sempre o MySQL deste compose, qualquer que seja o .env.dev.
+    environment:
+      PORT: 1341
+      DATABASE_CLIENT: mysql2
+      DATABASE_HOST: eventando-db
+      DATABASE_PORT: 3306
+      DATABASE_NAME: eventando
+      DATABASE_USERNAME: eventando
+      DATABASE_PASSWORD: eventando
+      DATABASE_SSL: 'false'
+    ports:
+      - '${EVENTANDO_PORT:-1341}:1341'
+    volumes:
+      - .:/opt/app
+      # O .env real da máquina nunca entra no container: lá dentro o .env é o .env.dev.
+      - ./.env.dev:/opt/app/.env:ro
+      # Diretório git no mesmo caminho do host: num git worktree o .git é um arquivo que aponta
+      # para lá, e sem isso todo git dentro do container falha (o yarn usa git).
+      - ${EVENTANDO_GIT_DIR:-./.git}:${EVENTANDO_GIT_DIR:-/opt/app/.git}:ro
+      - eventando-node-modules:/opt/app/node_modules
+      - eventando-yarn-cache:/cache/yarn
+    depends_on:
+      eventando-db:
+        condition: service_healthy
+
+  # Banco só de desenvolvimento; usuário e senha fixos e públicos. O teste de integração usa
+  # outro banco (eventando_test) no mesmo servidor, para não apagar os dados do make dev.
+  eventando-db:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: eventando
+      MYSQL_USER: eventando
+      MYSQL_PASSWORD: eventando
+      MYSQL_ROOT_PASSWORD: eventando-root
+    ports:
+      - '127.0.0.1:${EVENTANDO_DB_PORT:-3308}:3306'
+    volumes:
+      - eventando-db-data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-uroot', '-peventando-root']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+# Nomes fixos: make dev aqui e make hub no frontend usam os mesmos volumes (banco, node_modules).
+volumes:
+  eventando-node-modules:
+    name: eventando-dev-eventando-node-modules
+  eventando-yarn-cache:
+    name: eventando-dev-eventando-yarn-cache
+  eventando-db-data:
+    name: eventando-dev-eventando-db-data

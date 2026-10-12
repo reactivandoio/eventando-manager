@@ -873,6 +873,11 @@ export interface ApiBatchBatch extends Schema.CollectionType {
       'oneToMany',
       'api::sale.sale'
     >;
+    coupons: Attribute.Relation<
+      'api::batch.batch',
+      'manyToMany',
+      'api::coupon.coupon'
+    >;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<
@@ -902,9 +907,8 @@ export interface ApiCouponCoupon extends Schema.CollectionType {
     draftAndPublish: false;
   };
   attributes: {
-    code: Attribute.String & Attribute.Required & Attribute.Unique;
+    code: Attribute.String & Attribute.Required;
     discount_percentage: Attribute.Integer &
-      Attribute.Required &
       Attribute.SetMinMax<
         {
           min: 1;
@@ -924,6 +928,15 @@ export interface ApiCouponCoupon extends Schema.CollectionType {
       'api::coupon.coupon',
       'oneToMany',
       'api::payment.payment'
+    >;
+    discount_type: Attribute.Enumeration<['percentage', 'fixed']> &
+      Attribute.DefaultTo<'percentage'>;
+    discount_value_cents: Attribute.BigInteger;
+    starts_at: Attribute.DateTime;
+    batches: Attribute.Relation<
+      'api::coupon.coupon',
+      'manyToMany',
+      'api::batch.batch'
     >;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
@@ -985,6 +998,8 @@ export interface ApiEventEvent extends Schema.CollectionType {
     >;
     slug: Attribute.String & Attribute.Unique;
     uuid: Attribute.UID;
+    payment_provider: Attribute.Enumeration<['pixai', 'opapingou']> &
+      Attribute.DefaultTo<'pixai'>;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<
@@ -995,6 +1010,47 @@ export interface ApiEventEvent extends Schema.CollectionType {
       Attribute.Private;
     updatedBy: Attribute.Relation<
       'api::event.event',
+      'oneToOne',
+      'admin::user'
+    > &
+      Attribute.Private;
+  };
+}
+
+export interface ApiOpapingouEventOpapingouEvent extends Schema.CollectionType {
+  collectionName: 'opapingou_events';
+  info: {
+    singularName: 'opapingou-event';
+    pluralName: 'opapingou-events';
+    displayName: 'Opa Pingou Event';
+    description: 'Eventos de webhook do Opa Pingou, gravados pelo BFF e processados depois (REA-6)';
+  };
+  options: {
+    draftAndPublish: false;
+  };
+  attributes: {
+    event_id: Attribute.String & Attribute.Required & Attribute.Unique;
+    type: Attribute.String;
+    test_mode: Attribute.Boolean & Attribute.DefaultTo<false>;
+    charge_id: Attribute.String;
+    payload: Attribute.JSON;
+    status: Attribute.Enumeration<
+      ['pending', 'processed', 'ignored', 'failed']
+    > &
+      Attribute.DefaultTo<'pending'>;
+    attempts: Attribute.Integer & Attribute.DefaultTo<0>;
+    last_error: Attribute.String;
+    processed_at: Attribute.DateTime;
+    createdAt: Attribute.DateTime;
+    updatedAt: Attribute.DateTime;
+    createdBy: Attribute.Relation<
+      'api::opapingou-event.opapingou-event',
+      'oneToOne',
+      'admin::user'
+    > &
+      Attribute.Private;
+    updatedBy: Attribute.Relation<
+      'api::opapingou-event.opapingou-event',
       'oneToOne',
       'admin::user'
     > &
@@ -1028,7 +1084,7 @@ export interface ApiPaymentPayment extends Schema.CollectionType {
     payment_identification: Attribute.UID;
     payment_data: Attribute.JSON;
     status: Attribute.Enumeration<
-      ['PEDING_PAYMENT', 'CANCELED', 'CONFIRMED', 'REFUND']
+      ['PEDING_PAYMENT', 'CANCELED', 'CONFIRMED', 'REFUND', 'EXPIRED']
     > &
       Attribute.DefaultTo<'PEDING_PAYMENT'>;
     confirmed_at: Attribute.DateTime;
@@ -1047,6 +1103,19 @@ export interface ApiPaymentPayment extends Schema.CollectionType {
     >;
     original_value: Attribute.BigInteger;
     payment_link: Attribute.String;
+    provider: Attribute.String;
+    kind: Attribute.Enumeration<['PIX_QR', 'PAYMENT_LINK']>;
+    provider_charge_id: Attribute.String;
+    previous_charge_ids: Attribute.Text;
+    provider_txid: Attribute.String;
+    provider_idempotency_key: Attribute.String;
+    attempt: Attribute.Integer & Attribute.DefaultTo<1>;
+    pix_br_code: Attribute.Text;
+    expires_at: Attribute.DateTime;
+    expired_at: Attribute.DateTime;
+    discount_kind: Attribute.Enumeration<['coupon', 'student']>;
+    discount_cents: Attribute.BigInteger;
+    min_charge_applied: Attribute.Boolean & Attribute.DefaultTo<false>;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<
@@ -1203,6 +1272,11 @@ export interface ApiSignupSignup extends Schema.CollectionType {
     >;
     checked_in: Attribute.Boolean & Attribute.DefaultTo<false>;
     checked_in_at: Attribute.DateTime;
+    cpf: Attribute.String &
+      Attribute.Private &
+      Attribute.SetMinMaxLength<{
+        maxLength: 11;
+      }>;
     createdAt: Attribute.DateTime;
     updatedAt: Attribute.DateTime;
     createdBy: Attribute.Relation<
@@ -1242,6 +1316,7 @@ declare module '@strapi/types' {
       'api::batch.batch': ApiBatchBatch;
       'api::coupon.coupon': ApiCouponCoupon;
       'api::event.event': ApiEventEvent;
+      'api::opapingou-event.opapingou-event': ApiOpapingouEventOpapingouEvent;
       'api::payment.payment': ApiPaymentPayment;
       'api::payment-integration.payment-integration': ApiPaymentIntegrationPaymentIntegration;
       'api::product.product': ApiProductProduct;
