@@ -15,6 +15,19 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NODE_ENV: production
+    services:
+      # MySQL de verdade para o teste de concorrência das inscrições (REA-6).
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_DATABASE: rea6
+          MYSQL_USER: strapi
+          MYSQL_PASSWORD: strapi
+          MYSQL_ROOT_PASSWORD: root
+        ports: ["3307:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +48,16 @@ jobs:
       - name: Lint (não bloqueia)
         continue-on-error: true
         run: npx -y eslint@8 --no-eslintrc -c .eslintrc --parser espree --parser-options=ecmaVersion:2022 --ext .js config src
+
+      - name: Testes
+        run: yarn test
+
+      # Strapi carregado contra o MySQL acima, com o Opa Pingou simulado num servidor local.
+      - name: Teste de integração (vagas, cupom e webhook com trava)
+        env:
+          NODE_ENV: development
+          DATABASE_PORT: "3307"
+        run: yarn test:integration
 
       - name: Testes dos scripts de deploy
         run: bash .github/scripts/env-scripts.test.sh

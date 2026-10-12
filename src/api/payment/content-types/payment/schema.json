@@ -39,7 +39,8 @@
         "PEDING_PAYMENT",
         "CANCELED",
         "CONFIRMED",
-        "REFUND"
+        "REFUND",
+        "EXPIRED"
       ],
       "default": "PEDING_PAYMENT"
     },
@@ -72,6 +73,55 @@
     },
     "payment_link": {
       "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "enumeration",
+      "enum": [
+        "PIX_QR",
+        "PAYMENT_LINK"
+      ]
+    },
+    "provider_charge_id": {
+      "type": "string"
+    },
+    "previous_charge_ids": {
+      "type": "text"
+    },
+    "provider_txid": {
+      "type": "string"
+    },
+    "provider_idempotency_key": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "default": 1
+    },
+    "pix_br_code": {
+      "type": "text"
+    },
+    "expires_at": {
+      "type": "datetime"
+    },
+    "expired_at": {
+      "type": "datetime"
+    },
+    "discount_kind": {
+      "type": "enumeration",
+      "enum": [
+        "coupon",
+        "student"
+      ]
+    },
+    "discount_cents": {
+      "type": "biginteger"
+    },
+    "min_charge_applied": {
+      "type": "boolean",
+      "default": false
     }
   }
 }

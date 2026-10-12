@@ -22,9 +22,13 @@ const makeRequest = async (method, path, body, headers) => {
       return response.data;
     }
   } catch (err) {
-    console.log("err: ", { err, config });
+    // Sem o config: ele tem o token do Pix Aí e nome/e-mail na descrição.
+    console.log(
+      `[pixai] ${method} ${path} falhou: HTTP ${err.response ? err.response.status : "-"}` +
+        ` requestId=${(err.response && err.response.headers && err.response.headers["x-request-id"]) || "-"}`
+    );
 
-    if (err.response.data) {
+    if (err.response && err.response.data) {
       throw err.response.data;
     }
     throw new Error(`Failed to ${method} on ${path}`);

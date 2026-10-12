@@ -7,295 +7,182 @@
 const { createCoreController } = require("@strapi/strapi").factories;
 
 const PixAiIntegration = require("../../../datasources/pixai");
+const { createOpaPingou, isEnabled } = require("../../../datasources/opapingou");
+const { normalizeCpf } = require("../../../utils/cpf");
+const { reserveSignup } = require("../services/reserve");
+
+const KINDS = ["PIX_QR", "PAYMENT_LINK"];
+const CPF_MESSAGE = "Informe um CPF válido.";
+const RETRY_MESSAGE = "Não conseguimos gerar o pagamento agora. Tente de novo em instantes.";
+
+// O CPF é obrigatório em toda inscrição nova quando SIGNUP_REQUIRE_CPF=true (ligar depois que o
+// BFF e o frontend que mandam o CPF estiverem no ar). Com cupom ele é sempre exigido: a regra
+// "um cupom por CPF no evento" depende dele.
+const cpfRequired = (body) =>
+  String(process.env.SIGNUP_REQUIRE_CPF || "").toLowerCase() === "true" ||
+  !!(body.coupon_code && String(body.coupon_code).trim());
+
+const publicSignup = (signup) => {
+  if (!signup) return {};
+  const { cpf, payment, ...rest } = signup;
+  return rest;
+};
+
+const chargeMessage = (code) =>
+  code === "PAYMENT_LINK_UNAVAILABLE"
+    ? "Link indisponível, pague por Pix."
+    : "Não foi possível gerar o pagamento. Tente novamente.";
 
 module.exports = createCoreController("api::signup.signup", ({ strapi }) => {
-  const eventService = strapi.service("api::event.event");
-  const paymentService = strapi.service("api::payment.payment");
-  const signupService = strapi.service("api::signup.signup");
+  const paymentQuery = () => strapi.db.query("api::payment.payment");
+
+  // Cria (ou reconsulta pela mesma Idempotency-Key) a cobrança do Opa Pingou fora da trava.
+  const createOpaCharge = async ({ payment, event, signup }) => {
+    const op = createOpaPingou();
+    let charge;
+    try {
+      ({ charge } = await op.createCharge({
+        amountCents: Number(payment.value),
+        validity: process.env.OPAPINGOU_CHARGE_VALIDITY || "FIFTEEN_MIN",
+        kind: payment.kind || "PIX_QR",
+        description: `Inscrição ${event.name || ""} - ${signup.name || ""}`.trim(),
+        idempotencyKey: payment.provider_idempotency_key,
+      }));
+    } catch (err) {
+      const code = err && err.code ? err.code : "UNKNOWN";
+      strapi.log.warn(
+        `[signup] cobrança do pagamento ${payment.id} falhou: code=${code} requestId=${(err && err.requestId) || "-"}`
+      );
+      if (err && err.retryable) {
+        // A cobrança pode ter sido criada: o pendente fica com a mesma chave e a pessoa tenta de
+        // novo (mesma cobrança, Idempotent-Replayed).
+        return { error: { status: 503, message: RETRY_MESSAGE } };
+      }
+      await paymentQuery().updateMany({
+        where: { id: payment.id, status: "PEDING_PAYMENT" },
+        data: { status: "CANCELED", canceled_at: new Date() },
+      });
+      return { error: { status: 400, message: chargeMessage(code) } };
+    }
+
+    try {
+      const updated = await paymentQuery().update({
+        where: { id: payment.id },
+        data: {
+          provider_charge_id: charge.id,
+          provider_txid: charge.txid || null,
+          pix_br_code: charge.brCode || null,
+          payment_link: charge.paymentLink || null,
+          expires_at: charge.expiresAt ? new Date(charge.expiresAt) : payment.expires_at,
+          payment_identification: `opapingou_${charge.id}`,
+        },
+      });
+      return { payment: updated };
+    } catch (err) {
+      // A cobrança existe no Opa Pingou: nunca cancelar aqui. O pendente fica com a mesma chave;
+      // a nova tentativa da pessoa recebe a mesma cobrança e grava de novo.
+      strapi.log.error(`[signup] cobrança ${charge.id} criada mas não gravada no pagamento ${payment.id}: ${err && err.code}`);
+      return { error: { status: 503, message: RETRY_MESSAGE } };
+    }
+  };
+
+  // Pix Aí: mesma reserva; a cobrança é criada depois da trava, como a do Opa Pingou.
+  const createPixAiCharge = async ({ payment, event, signup }) => {
+    try {
+      const response = await PixAiIntegration.createPayment({
+        description: `Inscrição no evento ${event.name}: ${signup.name} - ${signup.email}`,
+        value: Number(payment.value),
+        token: event.pixai_token_integration,
+      });
+      const updated = await paymentQuery().update({
+        where: { id: payment.id },
+        data: {
+          payment_identification: response.localPayment.payment_identification,
+          pix_qr_code: response.localPayment.pix_qr_code,
+          payment_link: response.localPayment.payment_link,
+          payment_data: response,
+        },
+      });
+      return { payment: updated };
+    } catch (err) {
+      strapi.log.error("[signup] Pix Aí: falha ao criar o pagamento");
+      await paymentQuery().updateMany({
+        where: { id: payment.id, status: "PEDING_PAYMENT" },
+        data: { status: "CANCELED", canceled_at: new Date() },
+      });
+      return { error: { status: 400, message: "Erro na integração de pagamento." } };
+    }
+  };
 
   return {
     async customCreate(ctx) {
-      const { params } = ctx;
-      const { body } = ctx.request;
-      const eventId = params.id;
-
-      let paymentValue = null;
-      let originalValue = null;
-      let selectedBatch = null;
-      let appliedCoupon = null;
-      let eventEntry = null;
-
-      // 0. Duplicate Signup Check
-      const existingSignup = await strapi.db
-        .query("api::signup.signup")
-        .findOne({
-          where: {
-            email: body.email,
-            event: eventId,
-          },
-        });
-
-      if (existingSignup) {
-        return ctx.send(
-          { status: "error", message: "Você já está inscrito neste evento!" },
-          400
-        );
+      const eventId = Number(ctx.params.id);
+      const body = ctx.request.body || {};
+      if (!Number.isInteger(eventId) || eventId <= 0) {
+        return ctx.send({ status: "error", message: "Evento inválido." }, 400);
       }
 
-      // 1. Resolve Batch (always required — free events use value=0 batches)
-      if (!body.batch_id) {
-        return ctx.send(
-          { status: "error", message: "Selecione um lote para se inscrever." },
-          400
-        );
+      let cpf = null;
+      if (body.cpf !== undefined && body.cpf !== null && String(body.cpf).trim() !== "") {
+        cpf = normalizeCpf(body.cpf);
+        if (!cpf) return ctx.send({ status: "error", message: CPF_MESSAGE }, 400);
+      } else if (cpfRequired(body)) {
+        return ctx.send({ status: "error", message: CPF_MESSAGE }, 400);
       }
 
-      selectedBatch = await strapi.entityService.findOne(
-        "api::batch.batch",
-        body.batch_id,
-        {
-          populate: { product: { populate: ["event"] } },
-        }
-      );
+      const kind = KINDS.includes(body.kind) ? body.kind : "PIX_QR";
+      const event = await strapi.db.query("api::event.event").findOne({
+        where: { id: eventId },
+        select: ["id", "payment_provider"],
+      });
+      if (!event) return ctx.send({ status: "error", message: "Evento não encontrado." }, 404);
+      const provider = isEnabled() && event.payment_provider === "opapingou" ? "opapingou" : "pixai";
 
-      if (
-        !selectedBatch ||
-        !selectedBatch.product ||
-        selectedBatch.product.event.id != eventId
-      ) {
-        return ctx.send(
-          { status: "error", message: "Lote inválido para este evento." },
-          400
-        );
-      }
-
-      if (
-        !selectedBatch.enabled ||
-        !selectedBatch.product.enabled ||
-        !selectedBatch.product.event
-      ) {
-        return ctx.send(
-          {
-            status: "error",
-            message: "Este produto não está disponível no momento.",
-          },
-          400
-        );
-      }
-
-      // 1.1 Validity window check
-      const now = new Date();
-      if (
-        selectedBatch.valid_from &&
-        now < new Date(selectedBatch.valid_from)
-      ) {
-        return ctx.send(
-          { status: "error", message: "Este lote ainda não abriu." },
-          400
-        );
-      }
-      if (
-        selectedBatch.valid_until &&
-        now > new Date(selectedBatch.valid_until)
-      ) {
-        return ctx.send(
-          { status: "error", message: "Este lote já encerrou as vendas." },
-          400
-        );
-      }
-
-      // 1.2 Stock control (Confirmed + Recent Pending)
-      if (selectedBatch.max_quantity) {
-        const confirmedCount = await strapi.db
-          .query("api::payment.payment")
-          .count({
-            where: {
-              batch: selectedBatch.id,
-              status: { $in: ["CONFIRMED", "PEDING_PAYMENT"] },
-            },
-          });
-
-        if (confirmedCount >= selectedBatch.max_quantity) {
-          return ctx.send(
-            {
-              status: "error",
-              message: "As vagas para este lote esgotaram.",
-            },
-            400
-          );
-        }
-      }
-
-      paymentValue = Number(selectedBatch.value) || 0;
-      originalValue = Number(selectedBatch.value) || 0;
-      eventEntry = selectedBatch.product.event;
-
-      if (paymentValue === null) {
-        return ctx.send(
-          {
-            status: "error",
-            message: "Opção de pagamento inválida ou esgotada!",
-          },
-          400
-        );
-      }
-
-      // 1.3 Event Capacity Check
-      if (eventEntry.max_slots) {
-        const totalEventSignups = await strapi.db
-          .query("api::payment.payment")
-          .count({
-            where: {
-              event: eventEntry.id,
-              status: { $in: ["CONFIRMED", "PEDING_PAYMENT"] },
-            },
-          });
-
-        if (totalEventSignups >= eventEntry.max_slots) {
-          return ctx.send(
-            {
-              status: "error",
-              message: "Este evento já atingiu a lotação máxima.",
-            },
-            400
-          );
-        }
-      }
-
-      // 1.4 Coupon Application
-      if (body.coupon_code) {
-        const coupon = await strapi.db.query("api::coupon.coupon").findOne({
-          where: {
-            code: body.coupon_code,
-            event: eventEntry.id,
-            enabled: true,
-          },
-        });
-
-        if (coupon) {
-          const now = new Date();
-          if (!coupon.expires_at || now <= new Date(coupon.expires_at)) {
-            // Check usage limit
-            if (coupon.max_uses) {
-              const uses = await strapi.db.query("api::payment.payment").count({
-                where: {
-                  coupon: coupon.id,
-                  status: { $in: ["CONFIRMED", "PEDING_PAYMENT"] },
-                },
-              });
-              if (uses >= coupon.max_uses) {
-                return ctx.send(
-                  {
-                    status: "error",
-                    message: "Este cupom atingiu o limite de usos.",
-                  },
-                  400
-                );
-              }
-            }
-
-            appliedCoupon = coupon;
-            const discount = (paymentValue * coupon.discount_percentage) / 100;
-            paymentValue = paymentValue - discount;
-          } else {
-            return ctx.send(
-              { status: "error", message: "Este cupom já expirou." },
-              400
-            );
-          }
-        } else {
-          return ctx.send(
-            { status: "error", message: "Cupom inválido ou desativado." },
-            400
-          );
-        }
-      }
-
-      // 1.5 Student Discount (50% off if eligible)
-      if (
-        body.is_student &&
-        selectedBatch &&
-        selectedBatch.half_price_eligible
-      ) {
-        paymentValue = Math.floor(paymentValue * 0.5);
-      }
-
-      const isFreeEvent = paymentValue <= 0;
-
-      // 2. Payment Integration (skip for free events)
-      let paymentIntegrationData = null;
-      if (!isFreeEvent) {
-        try {
-          const response = await PixAiIntegration.createPayment({
-            description: `Inscrição no evento ${eventEntry.name}: ${body.name} - ${body.email}`,
-            value: paymentValue,
-            token: eventEntry.pixai_token_integration,
-          });
-
-          paymentIntegrationData = response;
-        } catch (err) {
-          console.error("PixAiIntegration.createPayment err: ", err);
-          return ctx.send(
-            { err, message: "Erro na integração de pagamento." },
-            400
-          );
-        }
-      }
-
-      // 3. Create Payment Entry
-      let paymentEntry = null;
+      let reserved;
       try {
-        paymentEntry = await paymentService.create({
-          data: {
-            value: paymentValue,
-            original_value: originalValue,
-            event: eventEntry.id,
-            batch: selectedBatch ? selectedBatch.id : null,
-            coupon: appliedCoupon ? appliedCoupon.id : null,
-            payment_identification:
-              isFreeEvent
-                ? `FREE_${Date.now()}`
-                : paymentIntegrationData.localPayment.payment_identification,
-            pix_qr_code: isFreeEvent
-              ? null
-              : paymentIntegrationData.localPayment.pix_qr_code,
-            payment_link: isFreeEvent
-              ? null
-              : paymentIntegrationData.localPayment.payment_link,
-            payment_data: isFreeEvent ? null : paymentIntegrationData,
-            status: isFreeEvent ? "CONFIRMED" : "PEDING_PAYMENT",
-            confirmed_at: isFreeEvent ? new Date() : null,
-          },
-        });
+        reserved = await reserveSignup({ eventId, body, cpf, provider, kind });
       } catch (err) {
-        return ctx.send({ err, message: "Falha ao criar pagamento." }, 400);
+        strapi.log.error(`[signup] falha ao reservar a inscrição: ${err && err.message}`);
+        return ctx.send({ status: "error", message: "Falha ao criar inscrição." }, 400);
+      }
+      if (reserved.error) {
+        return ctx.send({ status: "error", message: reserved.error.message }, reserved.error.status);
       }
 
-      // 4. Create Signup Entry
-      let signupEntry = null;
-      try {
-        signupEntry = await signupService.create({
-          data: {
-            name: body.name,
-            email: body.email,
-            phone_number: body.phone_number,
-            payment: paymentEntry.id,
-            event: eventId,
-            t_shirt_size: body.t_shirt_size,
-            additional_information: body.additional_information,
-          },
-        });
-      } catch (err) {
-        return ctx.send({ err, message: "Falha ao criar inscrição." }, 400);
+      let { payment } = reserved;
+      const { signup, priced, minChargeCents } = reserved;
+      const fullEvent = await strapi.db.query("api::event.event").findOne({ where: { id: eventId } });
+      if (reserved.needsCharge) {
+        const created =
+          provider === "opapingou"
+            ? await createOpaCharge({ payment, event: fullEvent, signup })
+            : await createPixAiCharge({ payment, event: fullEvent, signup });
+        if (created.error) {
+          return ctx.send({ status: "error", message: created.error.message }, created.error.status);
+        }
+        payment = created.payment;
       }
 
+      const isFree = Number(payment.value) === 0 && payment.status === "CONFIRMED";
       return ctx.send(
         {
-          ...signupEntry,
-          qr_code: paymentEntry.pix_qr_code,
-          payment_link: paymentEntry.payment_link,
-          payment_id: paymentEntry.id,
-          is_free: isFreeEvent,
+          ...publicSignup(signup),
+          signup_id: signup.id,
+          payment_id: payment.id,
+          payment_provider: isFree ? null : provider,
+          kind: payment.kind || null,
+          status: payment.status,
+          qr_code: payment.pix_qr_code || null,
+          pix_br_code: payment.pix_br_code || null,
+          payment_link: payment.payment_link || null,
+          expires_at: payment.expires_at || null,
+          value: Number(payment.value) || 0,
+          original_value: Number(payment.original_value) || 0,
+          discount_kind: priced.discountKind || null,
+          discount_cents: priced.discountCents || 0,
+          min_charge_applied: !!priced.minApplied,
+          min_charge_cents: minChargeCents,
+          is_free: isFree,
         },
         200
       );

@@ -1,0 +1,29 @@
+{
+  "kind": "collectionType",
+  "collectionName": "opapingou_events",
+  "info": {
+    "singularName": "opapingou-event",
+    "pluralName": "opapingou-events",
+    "displayName": "Opa Pingou Event",
+    "description": "Eventos de webhook do Opa Pingou, gravados pelo BFF e processados depois (REA-6)"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "event_id": { "type": "string", "required": true, "unique": true },
+    "type": { "type": "string" },
+    "test_mode": { "type": "boolean", "default": false },
+    "charge_id": { "type": "string" },
+    "payload": { "type": "json" },
+    "status": {
+      "type": "enumeration",
+      "enum": ["pending", "processed", "ignored", "failed"],
+      "default": "pending"
+    },
+    "attempts": { "type": "integer", "default": 0 },
+    "last_error": { "type": "string" },
+    "processed_at": { "type": "datetime" }
+  }
+}
