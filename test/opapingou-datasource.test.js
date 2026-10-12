@@ -130,3 +130,73 @@ test("sem chave não chama a API", async () => {
   await assert.rejects(op.me(), (e) => e.code === "API_KEY_MISSING");
   assert.equal(http.calls.length, 0);
 });
+
+// ---------- prazo total (504 da primeira inscrição paga em produção) ----------
+
+// Relógio falso: o http "trava" até o timeout pedido e o sleep só avança o relógio.
+const clockSetup = (behaviours, { deadlineMs = 40000, timeout = 15000 } = {}) => {
+  let t = 0;
+  const calls = [];
+  const http = {
+    request: async (config) => {
+      calls.push(config);
+      const b = behaviours.shift() || "hang";
+      if (b === "hang") {
+        t += config.timeout;
+        throw Object.assign(new Error(`timeout of ${config.timeout}ms exceeded`), { code: "ECONNABORTED" });
+      }
+      t += b.ms || 100;
+      return { headers: {}, ...b.res };
+    },
+  };
+  const op = createOpaPingou({
+    apiKey: KEY,
+    http,
+    sleep: async (ms) => {
+      t += ms;
+    },
+    now: () => t,
+    log: { info() {}, error() {} },
+    alert() {},
+    deadlineMs,
+    timeout,
+  });
+  return { op, calls, elapsed: () => t };
+};
+
+test("Opa Pingou sem responder: desiste dentro do prazo total (antes dos 60 s do proxy)", async () => {
+  const { op, elapsed, calls } = clockSetup(["hang", "hang", "hang", "hang"]);
+  await assert.rejects(
+    op.createCharge({ amountCents: 1990, idempotencyKey: "signup-payment-1-v1" }),
+    (e) => e.code === "DEADLINE_EXCEEDED" && e.retryable
+  );
+  assert.ok(elapsed() <= 40000, `levou ${elapsed()} ms`);
+  assert.ok(calls.every((c) => c.headers["Idempotency-Key"] === "signup-payment-1-v1"));
+});
+
+test("sem o prazo, o mesmo caso passaria de 60 s (o que gerou o 504)", async () => {
+  const { op, elapsed } = clockSetup(["hang", "hang", "hang", "hang"], { deadlineMs: 10 ** 9 });
+  await assert.rejects(op.createCharge({ amountCents: 1990, idempotencyKey: "k" }));
+  assert.ok(elapsed() > 60000, `levou ${elapsed()} ms`);
+});
+
+test("lento na primeira, responde na segunda: devolve a cobrança dentro do prazo", async () => {
+  const { op, elapsed } = clockSetup(["hang", { ms: 3000, res: { status: 201, data: { id: "ch_9" }, headers: { "idempotent-replayed": "true" } } }]);
+  const r = await op.createCharge({ amountCents: 1990, idempotencyKey: "k" });
+  assert.equal(r.charge.id, "ch_9");
+  assert.equal(r.replayed, true);
+  assert.ok(elapsed() <= 40000);
+});
+
+test("429 com Retry-After maior que o tempo restante não espera: devolve erro repetível", async () => {
+  const { op, elapsed } = clockSetup([{ ms: 100, res: { status: 429, data: { code: "RATE_LIMITED" }, headers: { "retry-after": "30" } } }], { deadlineMs: 20000 });
+  await assert.rejects(op.createCharge({ amountCents: 1990, idempotencyKey: "k" }), (e) => e.code === "RATE_LIMITED" && e.retryable);
+  assert.ok(elapsed() < 1000);
+});
+
+test("cada tentativa usa no máximo o tempo que sobra do prazo", async () => {
+  const { op, calls } = clockSetup(["hang", "hang", "hang"], { deadlineMs: 20000, timeout: 15000 });
+  await assert.rejects(op.createCharge({ amountCents: 1990, idempotencyKey: "k" }));
+  assert.equal(calls[0].timeout, 15000);
+  assert.ok(calls[1].timeout <= 20000 - 15000 - 1000);
+});
