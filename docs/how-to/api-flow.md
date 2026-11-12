@@ -162,6 +162,12 @@ Ao realizar uma inscrição (`POST /api/signup/:id`), o sistema executa uma sér
 
 ---
 
+### Declaração de maioridade (REA-36)
+
+O Hub só aceita inscrições de quem tem 18 anos ou mais. O BFF exige o checkbox "Declaro que tenho 18 anos ou mais" e envia `adult_declaration: true` no corpo do `POST /api/signup/:id`; a inscrição grava o momento em `adult_declaration_at` (também numa nova tentativa de pagamento da mesma inscrição). Sem o campo, a inscrição é salva como antes e `adult_declaration_at` fica nulo. O credenciamento manual do BFF grava `adult_declaration_at` direto na inscrição.
+
+---
+
 ## 7. Aprovação Manual de Inscrição (REA-34)
 
 Rotas usadas pelo BFF, com o token de API de acesso total (sem `auth: false`). O BFF só chama para quem é admin. Não gera cobrança nem mexe no Opa Pingou: o Payment vira `CONFIRMED` e guarda `manual_approved_at` e `manual_approved_by` (`{ id, email, name }`); `value`, `original_value`, `coupon` e `batch` ficam como estavam e quem lê trata a inscrição como R$ 0, fora da receita.
