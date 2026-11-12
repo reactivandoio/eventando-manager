@@ -128,6 +128,12 @@
       "relation": "manyToOne",
       "target": "api::opapingou-connection.opapingou-connection",
       "private": true
+    },
+    "manual_approved_at": {
+      "type": "datetime"
+    },
+    "manual_approved_by": {
+      "type": "json"
     }
   }
 }

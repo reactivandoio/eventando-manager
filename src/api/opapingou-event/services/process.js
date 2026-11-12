@@ -118,6 +118,18 @@ const createProcessor = ({
         alert(`pagamento ${payment.id} confirmado por cobrança anterior ${chargeId}; conferir cobrança em aberto`);
       }
     }
+    // REA-34: inscrição aprovada manualmente é CONFIRMED e as transições nunca saem de CONFIRMED, então
+    // charge.expired/charge.canceled (QR vencido) ou charge.paid (Pix pago depois) não desfazem nada
+    // nem geram segundo e-mail (transitioned: false). Fica no log; dinheiro que entrou precisa de conferência.
+    if (!transitioned && payment.manual_approved_at) {
+      const chargeStatus = String((charge && charge.status) || "?").toUpperCase();
+      const paid = target === "CONFIRMED";
+      const warn = log.warn ? log.warn.bind(log) : log.error.bind(log);
+      warn(
+        `[opapingou] pagamento ${payment.id} aprovado manualmente; ${row.type}/${chargeStatus} ignorado` +
+          (paid ? ` (entrou dinheiro numa inscrição já aprovada manualmente: conferir a cobrança ${chargeId})` : "")
+      );
+    }
 
     await finish(row, "processed", { attempts: (Number(row.attempts) || 0) + 1 });
     const fresh = await db.getPayment(payment.id);

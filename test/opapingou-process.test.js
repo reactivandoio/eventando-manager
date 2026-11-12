@@ -36,9 +36,10 @@ const setup = ({ events, payments, charges = {}, env = {} }) => {
       return c;
     },
   };
-  const log = { error: (m) => alerts.push(m), info() {} };
+  const warns = [];
+  const log = { error: (m) => alerts.push(m), warn: (m) => warns.push(m), info() {} };
   const run = createProcessor({ db, opapingou, log, env });
-  return { db, run, alerts, lookups };
+  return { db, run, alerts, lookups, warns };
 };
 
 const pending = (over = {}) => ({
@@ -221,4 +222,49 @@ test("REA-12: mesma conta no webhook e no pagamento: 404 não tenta de novo", as
   const r = await run("evt_1");
   assert.equal(r.body.reason, "charge_not_in_account");
   assert.equal(second, 0);
+});
+
+// REA-34: webhook depois de uma aprovação manual nunca desfaz a aprovação e fica no log.
+const APPROVED_AT = new Date("2026-11-10T10:00:00Z");
+const APPROVER = { id: "42", email: "admin@x.com", name: "Admin" };
+const approved = () =>
+  pending({ status: "CONFIRMED", confirmed_at: APPROVED_AT, manual_approved_at: APPROVED_AT, manual_approved_by: APPROVER });
+
+for (const [type, chargeStatus] of [
+  ["charge.expired", "EXPIRED"],
+  ["charge.canceled", "CANCELED"],
+  ["charge.paid", "PAID"],
+]) {
+  test(`${type} depois de aprovação manual: não transiciona, segue CONFIRMED e loga`, async () => {
+    const { run, db, warns } = setup({
+      events: [ev({ type })],
+      payments: [approved()],
+      charges: { ch_1: { status: chargeStatus } },
+    });
+    const r = await run("evt_1");
+    assert.equal(r.httpStatus, 200);
+    assert.equal(r.body.transitioned, false);
+    assert.equal(r.body.status, "CONFIRMED");
+    const p = db.payments[0];
+    assert.equal(p.status, "CONFIRMED");
+    assert.equal(p.confirmed_at, APPROVED_AT);
+    assert.equal(p.manual_approved_at, APPROVED_AT);
+    assert.deepEqual(p.manual_approved_by, APPROVER);
+    assert.equal(p.expired_at, undefined);
+    assert.equal(p.canceled_at, undefined);
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /^\[opapingou\] pagamento 7 aprovado manualmente; /);
+    assert.ok(warns[0].includes(`${type}/${chargeStatus} ignorado`));
+    if (chargeStatus === "PAID") assert.match(warns[0], /entrou dinheiro/);
+  });
+}
+
+test("webhook sem aprovação manual não gera o aviso", async () => {
+  const { run, warns } = setup({
+    events: [ev({ type: "charge.expired" })],
+    payments: [pending({ status: "CONFIRMED" })],
+    charges: { ch_1: { status: "EXPIRED" } },
+  });
+  await run("evt_1");
+  assert.deepEqual(warns, []);
 });

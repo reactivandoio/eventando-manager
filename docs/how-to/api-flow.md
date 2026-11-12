@@ -159,3 +159,32 @@ Ao realizar uma inscrição (`POST /api/signup/:id`), o sistema executa uma sér
 | **Cupom Expirado**      | "Este cupom já expirou."                       | A data de validade do cupom passou.                       |
 | **Cupom esgotado**      | "Este cupom atingiu o limite de usos."         | O cupom atingiu seu `max_uses`.                           |
 | **Produto Desativado**  | "Este produto não está disponível no momento." | O Produto ou Lote está com `enabled: false`.              |
+
+---
+
+## 7. Aprovação Manual de Inscrição (REA-34)
+
+Rotas usadas pelo BFF, com o token de API de acesso total (sem `auth: false`). O BFF só chama para quem é admin. Não gera cobrança nem mexe no Opa Pingou: o Payment vira `CONFIRMED` e guarda `manual_approved_at` e `manual_approved_by` (`{ id, email, name }`); `value`, `original_value`, `coupon` e `batch` ficam como estavam e quem lê trata a inscrição como R$ 0, fora da receita.
+
+Aprováveis: Payment `PEDING_PAYMENT` (mesmo com o Pix ainda válido), `EXPIRED` ou `CANCELED`. Não aprováveis: `REFUND`, `CONFIRMED` e inscrição sem Payment (importada/manual). Lote lotado, evento lotado ou cupom esgotado não impedem: viram `warnings` (contagens de `ACTIVE_WHERE` sem o próprio pagamento).
+
+**Pré-visualização:** `GET /api/payment/manual-approval/preview?event_id=<id do evento>&signup_id=<id da inscrição>`
+
+```json
+{ "approvable": true, "reason": null, "status": "EXPIRED", "warnings": ["BATCH_FULL"] }
+```
+
+`reason`: `null` | `NOT_FOUND` | `NO_PAYMENT` | `ALREADY_CONFIRMED` | `REFUNDED` | `ALREADY_APPROVED`. `warnings`: `BATCH_FULL`, `EVENT_FULL`, `COUPON_EXHAUSTED`.
+
+**Aprovação:** `POST /api/payment/manual-approval`
+
+```json
+{ "event_id": 2, "signup_id": 3, "approved_by": { "id": "42", "email": "admin@x.com", "name": "Admin" } }
+```
+
+- `200` `{ approved: true, already_approved, warnings, payment: { id, status, value, manual_approved_at, manual_approved_by }, signup: { id, documentId, name, email, phone_number, cpf }, event: { id, uuid, slug } }`. Aprovar uma já aprovada manualmente devolve `already_approved: true` sem alterar nada.
+- `404` `{ error: { code: "NOT_FOUND" } }`: inscrição inexistente ou de outro evento.
+- `409` `{ error: { code: "NO_PAYMENT" | "ALREADY_CONFIRMED" | "REFUNDED" } }`.
+- `400` `{ error: { code: "INVALID_APPROVER" } }`: `approved_by` sem `id` nem `email`.
+
+A transição é condicional ao status de origem, então não corre com um webhook. Webhook posterior (`charge.expired`, `charge.canceled` ou `charge.paid`) nunca desfaz a aprovação nem manda segundo e-mail; o caso fica no log (`[opapingou] pagamento <id> aprovado manualmente; <tipo>/<status> ignorado`).

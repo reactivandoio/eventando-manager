@@ -20,6 +20,9 @@ const ACTIVE = ["CONFIRMED", "PEDING_PAYMENT"];
 const ACTIVE_WHERE = {
   $or: [{ status: "CONFIRMED" }, { status: "PEDING_PAYMENT", expires_at: { $notNull: true } }],
 };
+// A mesma regra de ACTIVE_WHERE para um pagamento já carregado (REA-34).
+const isActivePayment = (p) =>
+  !!p && (p.status === "CONFIRMED" || (p.status === "PEDING_PAYMENT" && p.expires_at != null));
 const RESERVATION_MS = 15 * 60 * 1000; // FIFTEEN_MIN, igual à validade do Pix
 const PROVIDER = "opapingou";
 
@@ -356,4 +359,14 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
     };
   });
 
-module.exports = { reserveSignup, quote, checkCoupon, checkCapacity, idempotencyKey, ACTIVE, ALREADY_SIGNED_UP };
+module.exports = {
+  reserveSignup,
+  quote,
+  checkCoupon,
+  checkCapacity,
+  idempotencyKey,
+  ACTIVE,
+  ACTIVE_WHERE,
+  isActivePayment,
+  ALREADY_SIGNED_UP,
+};
