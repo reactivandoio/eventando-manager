@@ -245,6 +245,8 @@ for (const [type, chargeStatus] of [
     assert.equal(r.httpStatus, 200);
     assert.equal(r.body.transitioned, false);
     assert.equal(r.body.status, "CONFIRMED");
+    // O BFF usa este campo para o próprio log e para não mandar e-mail.
+    assert.equal(r.body.payment.manual_approved_at, APPROVED_AT);
     const p = db.payments[0];
     assert.equal(p.status, "CONFIRMED");
     assert.equal(p.confirmed_at, APPROVED_AT);

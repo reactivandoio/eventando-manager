@@ -23,6 +23,8 @@ const publicPayment = (p) =>
     id: p.id,
     value: Number(p.value) || 0,
     status: p.status,
+    // REA-34: o BFF reconhece a aprovação manual (log, sem segundo e-mail).
+    manual_approved_at: p.manual_approved_at || null,
     signup: p.signup
       ? { id: p.signup.id, name: p.signup.name, email: p.signup.email, phone_number: p.signup.phone_number }
       : null,
