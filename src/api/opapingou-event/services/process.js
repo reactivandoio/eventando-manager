@@ -23,6 +23,8 @@ const publicPayment = (p) =>
     id: p.id,
     value: Number(p.value) || 0,
     status: p.status,
+    // REA-34: o BFF reconhece a aprovação manual (log, sem segundo e-mail).
+    manual_approved_at: p.manual_approved_at || null,
     signup: p.signup
       ? { id: p.signup.id, name: p.signup.name, email: p.signup.email, phone_number: p.signup.phone_number }
       : null,
@@ -117,6 +119,18 @@ const createProcessor = ({
       if (transitioned && target === "CONFIRMED" && !isCurrent) {
         alert(`pagamento ${payment.id} confirmado por cobrança anterior ${chargeId}; conferir cobrança em aberto`);
       }
+    }
+    // REA-34: inscrição aprovada manualmente é CONFIRMED e as transições nunca saem de CONFIRMED, então
+    // charge.expired/charge.canceled (QR vencido) ou charge.paid (Pix pago depois) não desfazem nada
+    // nem geram segundo e-mail (transitioned: false). Fica no log; dinheiro que entrou precisa de conferência.
+    if (!transitioned && payment.manual_approved_at) {
+      const chargeStatus = String((charge && charge.status) || "?").toUpperCase();
+      const paid = target === "CONFIRMED";
+      const warn = log.warn ? log.warn.bind(log) : log.error.bind(log);
+      warn(
+        `[opapingou] pagamento ${payment.id} aprovado manualmente; ${row.type}/${chargeStatus} ignorado` +
+          (paid ? ` (entrou dinheiro numa inscrição já aprovada manualmente: conferir a cobrança ${chargeId})` : "")
+      );
     }
 
     await finish(row, "processed", { attempts: (Number(row.attempts) || 0) + 1 });

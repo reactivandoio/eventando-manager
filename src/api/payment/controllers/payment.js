@@ -7,6 +7,7 @@
 // d012e1f543eb327286ad1f5001cac58d9b26347a4f5c714217630b4013940a1529d6ad55ec7f22147e9f7df6a1957fb3cebdb8902a2ad0561b77e0dcfde2fd20b75f23818f7283c42f1fada843213722e6297f1dd877a064fe3bc3a427590f3877682af00d99747f783a68dc0b4c64427d0a86486d0805d972090e94aa300b7d
 
 const { createCoreController } = require("@strapi/strapi").factories;
+const { createManualApproval, strapiManualApprovalDb } = require("../services/manual-approval");
 
 module.exports = createCoreController("api::payment.payment", ({ strapi }) => {
   const paymentService = strapi.service("api::payment.payment");
@@ -81,7 +82,27 @@ module.exports = createCoreController("api::payment.payment", ({ strapi }) => {
     return itemToMail;
   };
 
+  const manualApproval = () => createManualApproval({ db: strapiManualApprovalDb(strapi), log: strapi.log });
+
   return {
+    // REA-34: GET /payment/manual-approval/preview?event_id=&signup_id=
+    async manualApprovalPreview(ctx) {
+      const { event_id, signup_id } = ctx.query || {};
+      const result = await manualApproval().preview({ eventId: event_id, signupId: signup_id });
+      return ctx.send(result, 200);
+    },
+
+    // REA-34: POST /payment/manual-approval { event_id, signup_id, approved_by: { id, email, name } }
+    async manualApproval(ctx) {
+      const body = ctx.request.body || {};
+      const { httpStatus, body: response } = await manualApproval().approve({
+        eventId: body.event_id,
+        signupId: body.signup_id,
+        approvedBy: body.approved_by,
+      });
+      return ctx.send(response, httpStatus);
+    },
+
     async resendEmail(ctx) {
       const { payment_identification } = ctx.request.body;
 
