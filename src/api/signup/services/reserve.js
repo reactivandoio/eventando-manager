@@ -12,6 +12,7 @@
 
 const { price, couponWindow, minChargeFor } = require("../../../utils/pricing");
 const { pickHolder } = require("../../../utils/signup-holder");
+const { adultDeclarationFields } = require("../../../utils/adult-declaration");
 const { chargeConnectionFor } = require("../../opapingou-connection/services/connections");
 
 const ACTIVE = ["CONFIRMED", "PEDING_PAYMENT"];
@@ -321,8 +322,10 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
           expired_at: null,
         },
       });
-      if (cpf && !existing.cpf) {
-        signup = await strapi.db.query("api::signup.signup").update({ where: { id: existing.id }, data: { cpf } });
+      // REA-36: a new attempt carries a new 18+ declaration.
+      const retryData = { ...(cpf && !existing.cpf ? { cpf } : {}), ...adultDeclarationFields(body) };
+      if (Object.keys(retryData).length > 0) {
+        signup = await strapi.db.query("api::signup.signup").update({ where: { id: existing.id }, data: retryData });
       }
     } else {
       payment = await strapi.db.query("api::payment.payment").create({
@@ -344,6 +347,7 @@ const reserveSignup = async ({ eventId, body, cpf, kind, paidEnabled = true, now
           cpf: cpf || null,
           payment: payment.id,
           event: eventId,
+          ...adultDeclarationFields(body),
         },
       });
     }
